@@ -16,9 +16,9 @@ jobs:
       npm_config_arch: x64
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -26,7 +26,24 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
-      - name: Build and publish x64 NSIS release
-        run: npm run release:nsis
-      - name: Build and publish x64 MSI release
-        run: npm run release:msi
+      - name: Build x64 NSIS release
+        run: npm run dist:nsis
+      - name: Build x64 MSI release
+        run: npm run dist:msi
+      - name: Publish complete GitHub release
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @(
+            "dist/Riot-Relay-Setup-${version}-x64.exe",
+            "dist/Riot-Relay-Setup-${version}-x64.exe.blockmap",
+            "dist/latest.yml",
+            "dist/Riot-Relay-${version}-x64.msi"
+          )
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --title "Riot Relay ${version}" --generate-notes --verify-tag
+          }
