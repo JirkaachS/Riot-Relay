@@ -4,6 +4,14 @@ Riot Relay is a Windows account command center for Riot games: encrypted credent
 
 **Version 1.3.2** · [Documentation](https://jirkaachs.github.io/Riot-Relay/) · [Latest release](https://github.com/JirkaachS/Riot-Relay/releases/latest) · [Security](https://jirkaachs.github.io/Riot-Relay/security.html) · [Privacy](https://jirkaachs.github.io/Riot-Relay/privacy.html)
 
+## Interface
+
+Sanitized interface mockups use synthetic demonstration data only. No real Riot account identifiers, credentials, sessions, messages, inventory, or user files are shown.
+
+[![Synthetic Riot Relay Accounts workspace with roster, rank summaries, and account actions](docs/assets/screenshots/accounts-overview.png)](docs/assets/screenshots/accounts-overview.png)
+
+<p align="center"><a href="docs/assets/screenshots/inventory-workspace.png"><img src="docs/assets/screenshots/inventory-workspace.png" width="49%" alt="Synthetic Riot Relay Inventory workspace with illustrative collection cards"></a> <a href="docs/assets/screenshots/privacy-security.png"><img src="docs/assets/screenshots/privacy-security.png" width="49%" alt="Synthetic Riot Relay Privacy and Security settings workspace"></a></p>
+
 ## What it protects
 
 - Account passwords are stored in a local AES-256-GCM encrypted vault protected by a master-password-derived key.
