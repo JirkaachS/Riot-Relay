@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' https://media.valorant-api.com https://*.valorant-api.com https://raw.communitydragon.org data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self' https://valorant-api.com" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Riot Relay</title>
+  <link rel="icon" type="image/png" href="../build/icon.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Title bar -->
+  <header class="titlebar">
+    <div class="titlebar__brand">
+      <img class="logo" src="../build/icon.png" alt="" />
+      <span class="titlebar__name">Riot Relay</span>
+      <span class="titlebar__ver" id="app-version-title">1.3.0</span>
+    </div>
+
+    <div class="titlebar__spacer"></div>
+    <div class="titlebar__controls">
+      <button class="wc" id="wc-min" title="Minimize"><span class="wc-min"></span></button>
+      <button class="wc" id="wc-max" title="Maximize"><span class="wc-max"></span></button>
+      <button class="wc wc--close" id="wc-close" title="Close"><span class="wc-close"></span></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <!-- Icon rail -->
+    <nav class="rail">
+      <div class="rail__group">
+        <button class="railbtn is-active" data-view="accounts" title="Accounts"><span data-icon="users" data-size="19"></span><span class="railbtn__lbl">Accounts</span></button>
+        <button class="railbtn" data-view="inventory" title="Inventory"><span data-icon="package" data-size="19"></span><span class="railbtn__lbl">Inventory</span></button>
+        <button class="railbtn" data-view="chat" title="Chat"><span data-icon="message-circle" data-size="19"></span><span class="railbtn__lbl">Chat</span></button>
+        <button class="railbtn" data-view="settings" title="Settings"><span data-icon="settings" data-size="19"></span><span class="railbtn__lbl">Settings</span></button>
+      </div>
+      <div class="rail__group">
+        <button class="railbtn railbtn--deceive" id="rail-deceive" title="Deceive: off"><span data-icon="eye-off" data-size="20"></span></button>
+        <button class="railbtn railbtn--lock" id="btn-lock" title="Lock vault"><span data-icon="lock" data-size="20"></span></button>
+      </div>
+    </nav>
+
+    <!-- SIDEBARS -->
+    <aside class="side" id="side-accounts">
+      <div class="side__head">
+        <span class="side__title">Roster</span>
+        <button class="side__add" id="btn-add" title="Add account"><span data-icon="plus" data-size="16"></span></button>
+      </div>
+      <div class="search side__search">
+        <span class="ic" data-icon="search" data-size="14"></span>
+        <input id="account-search" type="text" placeholder="Search" />
+      </div>
+      <div class="side__list" id="account-list"></div>
+    </aside>
+
+    <aside class="side" id="side-inventory" hidden>
+      <div class="side__head"><span class="side__title">Inventory value</span></div>
+      <div class="valuecard" id="inv-value">
+        <div class="valuecard__empty muted">Load an inventory to appraise your skins.</div>
+      </div>
+      <div class="side__head side__head--sub"><span class="side__title">Sections</span></div>
+      <div class="side__list section-list" id="section-list"></div>
+      <div class="side__foot" id="export-foot" hidden>
+        <div class="export-row">
+          <button class="btn btn--ghost btn--sm" id="btn-export-json"><span class="ic" data-icon="file-json" data-size="14"></span>JSON</button>
+          <button class="btn btn--ghost btn--sm" id="btn-export-csv"><span class="ic" data-icon="sheet" data-size="14"></span>CSV</button>
+        </div>
+        <button class="btn btn--primary btn--block" id="btn-export-png">
+          <span class="ic" data-icon="image" data-size="15"></span>Export skins card
+        </button>
+        <label class="check check--foot" id="value-header-wrap"><input type="checkbox" id="export-include-value" checked /><span>Include value header</span></label>
+      </div>
+    </aside>
+
+    <aside class="side" id="side-chat" hidden>
+      <div class="side__head">
+        <span class="side__title">Current account chat</span>
+        <button class="side__add" id="btn-chat-refresh-side" title="Refresh friends"><span data-icon="refresh-cw" data-size="14"></span></button>
+      </div>
+      <div class="chat-identity" id="chat-identity">Riot Client not connected</div>
+      <div class="search side__search">
+        <span class="ic" data-icon="search" data-size="14"></span>
+        <input id="chat-search" type="text" placeholder="Search friends" />
+      </div>
+      <div class="side__list chat-friends" id="chat-friends"></div>
+    </aside>
+
+    <aside class="side" id="side-settings" hidden>
+      <div class="side__head"><span class="side__title">Settings</span></div>
+      <div class="side__list">
+        <button class="settingnav is-active" data-group="client">Riot Client</button>
+        <button class="settingnav" data-group="deceive">Deceive</button>
+        <button class="settingnav" data-group="privacy">Privacy</button>
+        <button class="settingnav" data-group="security">Security</button>
+        <button class="settingnav" data-group="catalog">Catalog</button>
+        <button class="settingnav" data-group="updates">Updates</button>
+        <button class="settingnav" data-group="help">Help &amp; sources</button>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+      <div class="toolbar">
+        <div class="toolbar__title" id="toolbar-title">Accounts</div>
+        <div class="titlebar__spacer"></div>
+        <div class="toolbar__actions" id="tb-accounts">
+          <button class="btn btn--ghost" id="btn-sync-current" title="Read the currently signed-in account">
+            <span class="ic" data-icon="refresh-cw" data-size="15"></span>Sync current
+          </button>
+          <button class="btn btn--primary" id="btn-add-2"><span class="ic" data-icon="plus" data-size="15"></span>Add account</button>
+        </div>
+        <div class="toolbar__actions" id="tb-inventory" hidden>
+          <select id="inv-game" class="select select--game" aria-label="Inventory game"></select>
+          <button class="btn btn--primary" id="btn-load-inventory"><span class="ic" data-icon="download" data-size="15"></span><span class="btn__label">Load inventory</span></button>
+        </div>
+        <div class="toolbar__actions" id="tb-chat" hidden>
+          <button class="btn btn--ghost" id="btn-chat-refresh"><span class="ic" data-icon="refresh-cw" data-size="14"></span>Refresh chat</button>
+        </div>
+        <div class="toolbar__actions" id="tb-settings" hidden></div>
+      </div>
+
+      <div class="workspace-tabs" role="tablist" aria-label="Workspace">
+        <button class="workspace-tab is-active" data-view="accounts" role="tab" aria-controls="view-accounts" aria-selected="true"><span data-icon="users" data-size="13"></span>Accounts</button>
+        <button class="workspace-tab" data-view="inventory" role="tab" aria-controls="view-inventory" aria-selected="false"><span data-icon="package" data-size="13"></span>Inventory</button>
+        <button class="workspace-tab" data-view="chat" role="tab" aria-controls="view-chat" aria-selected="false"><span data-icon="message-circle" data-size="13"></span>Chat</button>
+        <button class="workspace-tab" data-view="settings" role="tab" aria-controls="view-settings" aria-selected="false"><span data-icon="settings" data-size="13"></span>Settings</button>
+      </div>
+
+      <!-- ACCOUNTS -->
+      <section class="view is-active" id="view-accounts">
+        <div id="account-detail" class="detail" hidden></div>
+        <div class="empty" id="accounts-empty">
+          <div class="empty__art" data-icon="shield" data-size="48"></div>
+          <h3 id="accounts-empty-title">No account selected</h3>
+          <p class="muted" id="accounts-empty-sub">Pick an account from the roster, or add your first one.</p>
+          <button class="btn btn--primary" id="btn-add-empty">Add account</button>
+        </div>
+      </section>
+
+      <!-- INVENTORY -->
+      <section class="view" id="view-inventory">
+        <div class="invbar" id="invbar" hidden>
+          <div class="invbar__title">
+            <span id="inv-section-name">Skins</span>
+            <span class="badge badge--count" id="inv-section-count">0</span>
+          </div>
+          <div class="titlebar__spacer"></div>
+          <div class="search">
+            <span class="ic" data-icon="search" data-size="14"></span>
+            <input id="inv-search" type="text" placeholder="Search items" />
+          </div>
+          <select id="inv-tier" class="select" aria-label="Inventory tier"><option value="">All tiers</option></select>
+        </div>
+        <div class="inv-grid" id="inv-grid"></div>
+        <div class="empty" id="inventory-empty">
+          <div class="empty__art" data-icon="package" data-size="48"></div>
+          <h3>Nothing loaded</h3>
+          <p class="muted">Sign in through the Riot Client, then load your inventory to appraise and export it.</p>
+          <button class="btn btn--primary" id="btn-load-inventory-empty">Load inventory</button>
+        </div>
+      </section>
+
+      <!-- CHAT -->
+      <section class="view" id="view-chat">
+        <div class="chat-workspace" id="chat-workspace" hidden>
+          <header class="chat-head">
+            <div><strong id="chat-title">Conversation</strong><span id="chat-presence">Current Riot session</span></div>
+          </header>
+          <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
+          <form class="chat-composer" id="chat-composer">
+            <textarea id="chat-message" rows="1" maxlength="1000" placeholder="Message current friend" aria-label="Chat message"></textarea>
+            <button class="btn btn--primary" id="btn-chat-send" type="submit"><span data-icon="send" data-size="14"></span>Send</button>
+          </form>
+        </div>
+        <div class="empty" id="chat-empty">
+          <div class="empty__art" data-icon="message-circle" data-size="48"></div>
+          <h3>Current-session chat</h3>
+          <p class="muted">Open Riot Client and sign in. Only that active account is live; inactive accounts remain safely separate.</p>
+          <button class="btn btn--primary" id="btn-chat-connect">Load friends</button>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings">
+        <div class="settings">
+          <div class="panel setting-group is-active" data-group="client">
+            <h3>Riot Client</h3>
+            <div class="field">
+              <label>RiotClientServices.exe path</label>
+              <div class="field__row">
+                <input id="set-client-path" type="text" placeholder="Auto-detected if left blank" />
+                <button class="btn btn--ghost" id="btn-pick-client">Browse</button>
+              </div>
+              <p class="hint" id="client-detected"></p>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="set-autofill" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span>Auto-fill credentials on switch</span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="set-minimize" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span>Minimize window after switching</span>
+            </label>
+            <label class="toggle toggle--stacked">
+              <input type="checkbox" id="set-minimize-tray" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Minimize to notification area</b><small>Enabled by default. Minimizing hides Riot Relay from the taskbar; restore or quit it from the Windows tray hidden-icons area.</small></span>
+            </label>
+          </div>
+
+          <div class="panel setting-group deceive-panel" data-group="deceive">
+            <div class="deceive-head">
+              <div>
+                <h3>Deceive presence <span class="badge badge--accent">built in</span></h3>
+                <p class="hint">A local Riot chat proxy changes only the presence your friends see. Parties, invites, voice, and game traffic remain untouched.</p>
+              </div>
+              <div class="deceive-runtime" id="deceive-runtime"><i class="dot dot--off"></i><span>Disabled</span></div>
+            </div>
+            <div class="deceive-grid">
+              <section class="deceive-card">
+                <span class="deceive-card__eyebrow">Proxy</span>
+                <strong id="deceive-proxy-state">Not running</strong>
+                <p id="deceive-proxy-detail">Enable Deceive, then switch an account to start the proxy.</p>
+              </section>
+              <section class="deceive-card">
+                <span class="deceive-card__eyebrow">League helper</span>
+                <strong id="deceive-chat-state">Waiting for Riot chat</strong>
+                <p>The helper contact is available in League only. VALORANT validates contacts against Riot’s backend, so use these in-app controls there.</p>
+              </section>
+            </div>
+            <label class="toggle deceive-toggle">
+              <input type="checkbox" id="set-deceive" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Enable on account switch</b><small>Disabling affects the next Riot launch; an active proxy stays connected safely.</small></span>
+            </label>
+            <div class="deceive-options">
+              <label class="toggle deceive-toggle">
+                <input type="checkbox" id="set-deceive-party" />
+                <span class="toggle__track"><span class="toggle__thumb"></span></span>
+                <span><b>Preserve parties and invites</b><small>Recommended. Keeps directed lobby and party presence intact.</small></span>
+              </label>
+              <div class="field deceive-activity">
+                <label for="deceive-activity-mode">Rich game activity</label>
+                <select id="deceive-activity-mode" class="select">
+                  <option value="preserve">Preserve Riot activity</option>
+                  <option value="hide">Hide Riot activity</option>
+                  <option value="generic">Generic custom status</option>
+                </select>
+                <small>Generic mode strips product/party-rich payloads and publishes only the bounded text below.</small>
+              </div>
+              <div class="field deceive-custom" id="deceive-custom-wrap">
+                <label for="deceive-custom-status">Custom Riot status</label>
+                <input id="deceive-custom-status" maxlength="96" placeholder="Available in Riot Client" />
+              </div>
+              <label class="toggle deceive-toggle">
+                <input type="checkbox" id="set-deceive-helper" />
+                <span class="toggle__track"><span class="toggle__thumb"></span></span>
+                <span><b>League chat helper</b><small>Adds the local command contact in League. It is intentionally disabled in VALORANT.</small></span>
+              </label>
+            </div>
+            <div class="field deceive-mode">
+              <label>Visible presence</label>
+              <div class="segmented" id="deceive-status" role="group" aria-label="Visible Riot presence">
+                <button type="button" data-status="offline">Offline</button>
+                <button type="button" data-status="mobile">Mobile</button>
+                <button type="button" data-status="away">Away</button>
+                <button type="button" data-status="chat">Online</button>
+              </div>
+              <button class="btn btn--ghost" id="btn-deceive-refresh" type="button"><span class="ic" data-icon="refresh-cw" data-size="13"></span>Refresh runtime</button>
+            </div>
+            <p class="deceive-error" id="deceive-last-error" hidden></p>
+          </div>
+
+          <div class="panel setting-group" data-group="privacy">
+            <h3>Identity privacy</h3>
+            <p class="hint">These controls affect presentation and exports only. Stored identities and PUUID verification remain unchanged.</p>
+            <label class="toggle">
+              <input type="checkbox" id="set-hide-login" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Hide login usernames</b><small>Roster and detail views mask the sign-in username independently.</small></span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="set-hide-display" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Hide account display names</b><small>Masks your Riot ID in the app and removes it from filenames, JSON, and image headers.</small></span>
+            </label>
+          </div>
+
+          <div class="panel setting-group" data-group="security">
+            <h3>Security</h3>
+            <p class="hint" id="enc-status"></p>
+            <section class="key-storage-panel" aria-labelledby="key-storage-title">
+              <div class="key-storage-panel__head">
+                <strong id="key-storage-title">Stored-key unlock</strong>
+                <p>Disabled by default and controlled separately for each encrypted vault.</p>
+              </div>
+              <div class="key-mode-options" id="key-storage-mode" role="radiogroup" aria-label="Stored-key unlock mode">
+                <label class="key-mode-option">
+                  <input type="radio" name="key-storage-mode" value="disabled" checked />
+                  <span><b>Disabled</b><small>Always require the master password and remove any stored key immediately.</small></span>
+                </label>
+                <label class="key-mode-option">
+                  <input type="radio" name="key-storage-mode" value="os" />
+                  <span><b>OS-stored key</b><small>Use Windows DPAPI for passwordless unlock on this Windows account, without an identity prompt.</small></span>
+                </label>
+                <label class="key-mode-option">
+                  <input type="radio" name="key-storage-mode" value="hello" />
+                  <span><b>OS-stored key + Windows Hello</b><small>Require a real Windows Hello, PIN, or biometric consent dialog before the DPAPI-wrapped key can unlock the vault.</small></span>
+                </label>
+              </div>
+              <p class="key-storage-status" id="hello-status"></p>
+            </section>
+            <div class="field security-password">
+              <label>Change master password</label>
+              <div class="field__row">
+                <input id="set-new-master" type="password" placeholder="New master password" />
+                <button class="btn btn--ghost" id="btn-change-master">Update</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel setting-group" data-group="catalog">
+            <h3>Cosmetic catalog</h3>
+            <p class="hint" id="catalog-status">Metadata + prices used to enrich and appraise inventory exports.</p>
+            <button class="btn btn--ghost" id="btn-refresh-catalog"><span class="ic" data-icon="refresh-cw" data-size="14"></span>Refresh catalog</button>
+          </div>
+
+          <div class="panel setting-group update-panel" data-group="updates">
+            <h3>Application updates <span class="badge badge--accent">GitHub</span></h3>
+            <p class="hint">Installed EXE builds check GitHub Releases automatically and download verified release metadata in the background.</p>
+            <section class="update-card" aria-live="polite">
+              <div class="update-card__head">
+                <span>UPDATE STATUS</span>
+                <b id="update-current-version">Riot Relay 1.3.0</b>
+              </div>
+              <strong id="update-status">Preparing update service…</strong>
+              <p id="update-detail">Automatic updates are initialized by the desktop process.</p>
+              <div class="update-progress" id="update-progress" hidden><i id="update-progress-bar"></i></div>
+            </section>
+            <div class="settings-actions update-actions">
+              <button class="btn btn--primary" id="btn-update-check" type="button">Check for updates</button>
+              <button class="btn btn--primary" id="btn-update-install" type="button" hidden>Restart and install</button>
+              <button class="btn btn--ghost" id="btn-open-releases" type="button">GitHub Releases</button>
+              <button class="btn btn--ghost" id="btn-open-docs" type="button">Documentation</button>
+            </div>
+            <p class="hint">Update checks disclose normal connection metadata to GitHub, but never vault contents, Riot credentials, PUUIDs, or account data. MSI installations are updated manually or by an administrator.</p>
+          </div>
+
+          <div class="panel setting-group" data-group="help">
+            <h3>Help &amp; data sources</h3>
+            <p class="hint">League ranks use OP.GG's undocumented JSON service when available, with identity-verified League Client data as fallback. The returned Riot ID is checked exactly before any rank is accepted, but third-party endpoints can change without notice.</p>
+            <div class="settings-actions">
+              <button class="btn btn--primary" id="btn-run-tour" type="button"><span class="ic" data-icon="book-open" data-size="14"></span>Run feature tour</button>
+            </div>
+            <p class="hint legal-note">Riot Relay is an unofficial community application and is not endorsed by Riot Games. Third-party notices are bundled with the application.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="activity-dock" id="activity-dock" aria-label="Activity">
+        <div class="activity-tabs">
+          <button class="activity-tab is-active" type="button">ACTIVITY</button>
+          <span class="activity-count" id="activity-count">0</span>
+          <span class="titlebar__spacer"></span>
+          <button class="activity-clear" id="activity-clear" type="button">Clear</button>
+        </div>
+        <div class="activity-lines" id="activity-lines">
+          <div class="activity-empty">Switch, verification, capture, and inventory events appear here.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Status bar -->
+  <footer class="statusbar" aria-label="Application status">
+    <span class="status status--client" id="status-client" role="status" aria-live="polite"><i class="dot dot--off"></i><span>Riot Client: checking…</span></span>
+    <span class="status status--account" id="status-account" role="status" aria-live="polite">No account signed in</span>
+    <span class="titlebar__spacer"></span>
+    <span class="status status--deceive" id="status-deceive">Deceive: disabled</span>
+    <span class="status status--catalog" id="status-catalog">Catalog: —</span>
+    <span class="status status--version" id="app-version-status">Riot Relay 1.3.0</span>
+  </footer>
+
+  <!-- Account modal -->
+  <div class="modal" id="account-modal" hidden>
+    <div class="modal__backdrop" data-close></div>
+    <div class="modal__box">
+      <div class="modal__head">
+        <h3 id="modal-title">Add account</h3>
+        <button class="iconbtn" data-close aria-label="Close"><span data-icon="x" data-size="15"></span></button>
+      </div>
+      <div class="modal__body">
+        <input type="hidden" id="acc-id" />
+        <div class="field">
+          <label>Display label</label>
+          <input id="acc-label" type="text" placeholder="e.g. Main / Smurf / EU" />
+        </div>
+        <div class="field">
+          <label>Riot username (for login)</label>
+          <input id="acc-username" type="text" autocomplete="off" placeholder="Login username" />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <div class="field__row">
+            <input id="acc-password" type="password" autocomplete="new-password" placeholder="Stored encrypted (AES-256-GCM)" />
+            <button class="iconbtn" id="acc-reveal" type="button" title="Show / hide"><span data-icon="eye" data-size="15"></span></button>
+          </div>
+          <p class="hint">Leave blank when editing to keep the current password.</p>
+        </div>
+        <div class="field">
+          <label>Verified League platform</label>
+          <input id="acc-league-platform" type="text" placeholder="Sync required" readonly />
+          <p class="hint">Detected from the PUUID-bound League Client or exact-PUUID provider discovery. It cannot be edited manually.</p>
+        </div>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" data-close>Cancel</button>
+        <button class="btn btn--primary" id="acc-save">Save account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lock overlay -->
+  <div class="lock" id="lock-overlay" hidden>
+    <div class="lock__card">
+      <img class="lock__logo brand-mark" src="../build/icon.png" alt="Riot Relay" />
+      <h2 id="lock-title">Unlock Riot Relay</h2>
+      <p class="muted" id="lock-sub">Enter your master password to decrypt the vault.</p>
+      <input id="lock-password" type="password" placeholder="Master password" autocomplete="off" />
+      <button class="btn btn--primary btn--block" id="lock-submit">Unlock</button>
+      <button class="btn btn--ghost btn--block" id="lock-parked" hidden>Use stored key</button>
+      <p class="lock__err" id="lock-error" hidden></p>
+    </div>
+  </div>
+
+  <!-- First-run onboarding -->
+  <div class="onboard" id="onboard" hidden>
+    <div class="onboard__card">
+      <img class="onboard__logo brand-mark" src="../build/icon.png" alt="Riot Relay" />
+      <div class="onboard__steps" id="onboard-dots"></div>
+
+      <div class="onboard__step is-active" data-step="0">
+        <h2>Welcome to Riot Relay</h2>
+        <p class="muted">Your Riot account command center. Here's what you get:</p>
+        <ul class="onboard__list">
+          <li><span class="ob-ic" data-icon="zap" data-size="15"></span> One-click, near-instant account switching</li>
+          <li><span class="ob-ic" data-icon="trophy" data-size="15"></span> Live rank &amp; level tracking</li>
+          <li><span class="ob-ic" data-icon="package" data-size="15"></span> Inventory viewer + value export (VALORANT, League, TFT)</li>
+          <li><span class="ob-ic" data-icon="eye-off" data-size="15"></span> Built-in "appear offline"</li>
+          <li><span class="ob-ic" data-icon="lock" data-size="15"></span> Credentials sealed with AES-256-GCM encryption</li>
+        </ul>
+        <button class="btn btn--primary btn--block" data-next>Get started</button>
+      </div>
+
+      <div class="onboard__step" data-step="1">
+        <h2>Create a master password</h2>
+        <p class="muted">This encrypts your vault on this device. There's no recovery — keep it somewhere safe.</p>
+        <input id="ob-pass" type="password" placeholder="Master password" autocomplete="new-password" />
+        <input id="ob-pass2" type="password" placeholder="Confirm master password" autocomplete="new-password" />
+        <p class="hint">OS key storage starts disabled. It can be enabled only from Security after this vault is unlocked.</p>
+        <p class="lock__err" id="ob-error" hidden></p>
+        <div class="onboard__nav"><button class="btn btn--ghost" data-back>Back</button><button class="btn btn--primary" data-next>Continue</button></div>
+      </div>
+
+      <div class="onboard__step" data-step="2">
+        <h2>Locate your Riot Client</h2>
+        <p class="muted" id="ob-client-msg">Detecting RiotClientServices.exe…</p>
+        <div class="field__row">
+          <input id="ob-client-path" type="text" placeholder="Path to RiotClientServices.exe" />
+          <button class="btn btn--ghost" id="ob-browse">Browse</button>
+        </div>
+        <p class="hint">Needed to launch and switch games. You can change this later in Settings.</p>
+        <div class="onboard__nav"><button class="btn btn--ghost" data-back>Back</button><button class="btn btn--primary" data-next>Continue</button></div>
+      </div>
+
+      <div class="onboard__step" data-step="3">
+        <h2>You're all set</h2>
+        <p class="muted">Add an account and sign in once. Then hit <b>Save session</b> on it to unlock instant, no-login switching.</p>
+        <button class="btn btn--primary btn--block" id="ob-finish">Create vault &amp; finish</button>
+        <p class="lock__err" id="ob-finish-error" hidden></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reusable feature tour -->
+  <div class="onboard feature-tour" id="feature-tour" hidden>
+    <div class="onboard__card feature-tour__card">
+      <img class="onboard__logo brand-mark" src="../build/icon.png" alt="Riot Relay" />
+      <button class="iconbtn feature-tour__close" id="tour-skip" type="button" aria-label="Close tutorial"><span data-icon="x" data-size="15"></span></button>
+      <div class="onboard__steps" id="tour-dots"></div>
+
+      <div class="tour__step is-active" data-tour-step="0">
+        <span class="tour__eyebrow">1 · Accounts</span><h2>Every identity stays separate</h2>
+        <p class="muted">Add login credentials once, then sync while that account is active. Riot ID and PUUID verification prevent ranks, inventories, portraits, and sessions from attaching to the wrong roster entry.</p>
+        <div class="tour__callout"><span data-icon="shield-check" data-size="18"></span><b>PUUID is always authoritative.</b></div>
+      </div>
+      <div class="tour__step" data-tour-step="1">
+        <span class="tour__eyebrow">2 · Switching</span><h2>Switch only—or launch a game</h2>
+        <p class="muted">Switch session changes the Riot account without launching a game. The VALORANT, League, and TFT actions switch and launch explicitly. If Riot asks for 2FA, enter it in Riot Client; the manager waits without restarting it.</p>
+      </div>
+      <div class="tour__step" data-tour-step="2">
+        <span class="tour__eyebrow">3 · Stats</span><h2>One unified account view</h2>
+        <p class="muted">VALORANT, League, and TFT ranks appear together. League rank uses an exact-identity OP.GG lookup and verified League Client data as fallback. The Chat workspace shows friends and messages for only the currently authenticated Riot account.</p>
+      </div>
+      <div class="tour__step" data-tour-step="3">
+        <span class="tour__eyebrow">4 · Inventory</span><h2>Browse, value, and export</h2>
+        <p class="muted">Load supported inventories, sort League skins by rarity, inspect chromas, emotes, icons, wards, TFT arenas and finishers, estimate VALORANT VP or League RP value, and export data or collection images.</p>
+      </div>
+      <div class="tour__step" data-tour-step="4">
+        <span class="tour__eyebrow">5 · Deceive</span><h2>Control how friends see you</h2>
+        <p class="muted">Choose Offline, Mobile, Away, or Online; optionally hide game activity while preserving parties. The chat helper works in League. VALORANT validates real backend contacts, so use the in-app controls there.</p>
+        <div class="tour__callout"><span data-icon="eye-off" data-size="18"></span><b>Restart Riot after enabling Deceive for the first time.</b></div>
+      </div>
+
+      <div class="onboard__nav feature-tour__nav"><button class="btn btn--ghost" id="tour-back" type="button">Back</button><span class="titlebar__spacer"></span><button class="btn btn--primary" id="tour-next" type="button">Next</button><button class="btn btn--primary" id="tour-finish" type="button" hidden>Finish tour</button></div>
+    </div>
+  </div>
+
+  <!-- Switch overlay -->
+  <div class="switching" id="switch-overlay" hidden>
+    <div class="switching__card">
+      <div class="spinner"></div>
+      <h3 id="switch-title">Switching account…</h3>
+      <p class="muted" id="switch-step">Preparing…</p>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+extends: ./electron-builder.yml
+extraMetadata:
+  installerFlavor: msi
+win:
+  target:
+    - target: msi
+      arch:
+        - x64

@@ -1,0 +1,552 @@
+'use strict';
+
+/**
+ * switcher.js — Seamless account switching on Windows.
+ *
+ * Flow:
+ *   1. Terminate every Riot/VALORANT/League process (so a fresh login is forced).
+ *   2. Relaunch RiotClientServices.exe pointed at VALORANT.
+ *   3. Wait for the login window, then auto-fill the stored username + password
+ *      via the Windows UI automation shim (SendKeys) and submit.
+ *
+ * The auto-fill step uses PowerShell + System.Windows.Forms.SendKeys, which is
+ * the reliable, dependency-free method on Windows. Credentials are passed to the
+ * script over stdin (never on the command line / never written to disk).
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn, execFile } = require('child_process');
+
+const RIOT_PROCESSES = [
+  'RiotClientServices', 'RiotClientUx', 'RiotClientUxRender', 'RiotClientCrashHandler',
+  'VALORANT', 'VALORANT-Win64-Shipping',
+  'LeagueClient', 'LeagueClientUx', 'LeagueClientUxRender', 'League of Legends',
+];
+
+const DEFAULT_CLIENT_PATHS = [
+  'C:\\Riot Games\\Riot Client\\RiotClientServices.exe',
+  'C:\\Program Files\\Riot Games\\Riot Client\\RiotClientServices.exe',
+  'C:\\Program Files (x86)\\Riot Games\\Riot Client\\RiotClientServices.exe',
+];
+
+// All Riot titles launch through RiotClientServices with a product/patchline.
+// Deceive accepts lol | lor | valorant (TFT rides the League client).
+const GAMES = {
+  valorant: { label: 'VALORANT', product: 'valorant', patchline: 'live', deceive: 'valorant' },
+  lol: { label: 'League of Legends', product: 'league_of_legends', patchline: 'live', deceive: 'lol' },
+  tft: { label: 'Teamfight Tactics', product: 'league_of_legends', patchline: 'live', deceive: 'lol' },
+  lor: { label: 'Legends of Runeterra', product: 'bacon', patchline: 'live', deceive: 'lor' },
+};
+
+function findRiotClient(configuredPath) {
+  if (configuredPath && fs.existsSync(configuredPath)) return configuredPath;
+  for (const p of DEFAULT_CLIENT_PATHS) if (fs.existsSync(p)) return p;
+  return null;
+}
+
+// The Riot Client persists your login (the "stay signed in" session cookie) in
+// these files. If we don't clear them, relaunching just resumes the current
+// account instead of switching. Removing them forces the login screen.
+const RIOT_DATA_DIR = path.join(os.homedir(), 'AppData', 'Local', 'Riot Games', 'Riot Client', 'Data');
+const LOL_DATA_DIR = path.join(os.homedir(), 'AppData', 'Local', 'Riot Games', 'League of Legends', 'Data');
+// Only the login/session cookie — do NOT touch RiotClientPrivateSettings.yaml
+// (client/UI prefs); removing that makes the client reinitialise and relaunch.
+const SESSION_FILE = 'RiotGamesPrivateSettings.yaml';
+
+function clearRiotSession() {
+  let removed = 0;
+  for (const dir of [RIOT_DATA_DIR, LOL_DATA_DIR]) {
+    const file = path.join(dir, SESSION_FILE);
+    try { if (fs.existsSync(file)) { fs.unlinkSync(file); removed += 1; } } catch { /* locked/ignore */ }
+  }
+  return removed;
+}
+
+function ps(script, stdin = null, onLine = null) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script], {
+      windowsHide: true,
+    });
+    let out = '', err = '', pending = '';
+    child.stdout.on('data', (data) => {
+      const text = String(data);
+      out += text;
+      if (!onLine) return;
+      pending += text;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() || '';
+      for (const line of lines) if (line.trim()) {
+        try { onLine(line.trim()); } catch { /* diagnostics only */ }
+      }
+    });
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (onLine && pending.trim()) {
+        try { onLine(pending.trim()); } catch { /* diagnostics only */ }
+      }
+      if (code === 0) return resolve(out.trim());
+      const reason = (err.trim().split(/\r?\n/)[0] || `PowerShell exited ${code}`).slice(0, 160);
+      reject(new Error(reason));
+    });
+    if (stdin !== null) child.stdin.write(stdin);
+    child.stdin.end();
+  });
+}
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function killRiotProcesses() {
+  const names = RIOT_PROCESSES.map((n) => `'${n.replace(/'/g, "''")}'`).join(',');
+  const script = `
+    $names = @(${names})
+    foreach ($n in $names) {
+      Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    # Wait until every Riot process is actually gone (up to ~10s) so a relaunch
+    # doesn't race a still-terminating client (which causes the login window to
+    # close and reopen).
+    for ($i = 0; $i -lt 50; $i++) {
+      $alive = $false
+      foreach ($n in $names) { if (Get-Process -Name $n -ErrorAction SilentlyContinue) { $alive = $true; break } }
+      if (-not $alive) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    'ok'
+  `;
+  await ps(script);
+}
+
+/**
+ * Launch VALORANT. When Deceive is enabled and present, we start it instead of
+ * the Riot Client directly — Deceive spawns the client for us while spoofing the
+ * chat connection so you appear offline. Usage: `Deceive.exe valorant`.
+ */
+/**
+ * Launch the chosen Riot game through RiotClientServices. When `configUrl` is
+ * provided (our built-in Deceive proxy), the client is pointed at it so its
+ * chat connection is routed through us for "appear offline".
+ */
+function launchClient(clientPath, { game = null, configUrl = '' } = {}) {
+  // The default switch authenticates the Riot Client only. A product is added
+  // solely for the explicit “Switch + launch game” action.
+  const args = [];
+  const selected = game && GAMES[game];
+  if (selected) args.push(`--launch-product=${selected.product}`, `--launch-patchline=${selected.patchline}`);
+  if (configUrl) args.unshift(`--client-config-url=${configUrl}`);
+  const child = spawn(clientPath, args, { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+/**
+ * Wait until the Riot Client login window exists, then type credentials.
+ * The SendKeys automation focuses the window, fills the username field,
+ * tabs to the password field, fills it, and presses Enter.
+ */
+async function autoLogin(username, password, onDiagnostic = () => {}) {
+  const stdin = JSON.stringify({ u: username, p: password });
+
+  // Riot's Chromium controls are not reliably exposed through UI Automation.
+  // Select the largest visible RiotClientUx window, explicitly click each field,
+  // and use native Unicode SendInput rather than assuming autofocus/Tab order.
+  const script = `
+    $raw = [Console]::In.ReadToEnd()
+    $creds = $raw | ConvertFrom-Json
+    Write-Output '{"checkpoint":"HELPER_STARTED"}'
+
+    Add-Type -TypeDefinition @"
+      using System;
+      using System.Collections.Generic;
+      using System.Runtime.InteropServices;
+      using System.Text;
+      using System.Threading;
+
+      public static class NativeInput {
+        private const uint INPUT_MOUSE = 0;
+        private const uint INPUT_KEYBOARD = 1;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const uint KEYEVENTF_UNICODE = 0x0004;
+        private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        private const int SW_RESTORE = 9;
+        private const uint GW_OWNER = 4;
+
+        [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public InputUnion U; }
+        [StructLayout(LayoutKind.Explicit)] public struct InputUnion {
+          [FieldOffset(0)] public MOUSEINPUT mi;
+          [FieldOffset(0)] public KEYBDINPUT ki;
+        }
+        [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
+          public int dx, dy; public uint mouseData, dwFlags, time; public UIntPtr dwExtraInfo;
+        }
+        [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
+          public ushort wVk, wScan; public uint dwFlags, time; public UIntPtr dwExtraInfo;
+        }
+
+        private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr h, uint cmd);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+        [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr h, out RECT r);
+        [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr h, ref POINT p);
+        [DllImport("user32.dll", SetLastError=true)] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32.dll")] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int cmd);
+        [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint a, uint b, bool attach);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll", SetLastError=true)] private static extern uint SendInput(uint n, INPUT[] inputs, int size);
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+
+        public static IntPtr FindRiotWindow(uint[] processIds) {
+          HashSet<uint> wanted = new HashSet<uint>(processIds ?? new uint[0]);
+          IntPtr best = IntPtr.Zero; long bestScore = 0;
+          EnumWindows(delegate(IntPtr h, IntPtr p) {
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            RECT r; if (!wanted.Contains(pid) || !IsWindowVisible(h) || GetWindow(h, GW_OWNER) != IntPtr.Zero || !GetWindowRect(h, out r)) return true;
+            long width = r.Right - r.Left, height = r.Bottom - r.Top;
+            if (width < 700 || height < 400) return true;
+            string cls = ClassName(h);
+            long score = width * height + (cls.StartsWith("Chrome_WidgetWin") ? 1000000000L : 0L);
+            if (score > bestScore) { best = h; bestScore = score; }
+            return true;
+          }, IntPtr.Zero);
+          return best;
+        }
+
+        public static string ClassName(IntPtr h) {
+          StringBuilder b = new StringBuilder(256); GetClassName(h, b, b.Capacity); return b.ToString();
+        }
+        public static uint ProcessId(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
+        public static int ClientWidth(IntPtr h) { RECT r; return GetClientRect(h, out r) ? r.Right - r.Left : 0; }
+        public static int ClientHeight(IntPtr h) { RECT r; return GetClientRect(h, out r) ? r.Bottom - r.Top : 0; }
+
+        public static bool Activate(IntPtr h) {
+          for (int attempt = 0; attempt < 8; attempt++) {
+            ShowWindow(h, SW_RESTORE);
+            IntPtr foreground = GetForegroundWindow();
+            uint unused, fgThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out unused);
+            uint targetThread = GetWindowThreadProcessId(h, out unused);
+            uint currentThread = GetCurrentThreadId();
+            bool attachedFg = fgThread != 0 && AttachThreadInput(currentThread, fgThread, true);
+            bool attachedTarget = targetThread != 0 && AttachThreadInput(currentThread, targetThread, true);
+            BringWindowToTop(h); SetForegroundWindow(h);
+            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+            if (attachedFg) AttachThreadInput(currentThread, fgThread, false);
+            Thread.Sleep(120);
+            if (GetForegroundWindow() == h) return true;
+          }
+          return false;
+        }
+
+        private static INPUT Key(ushort vk, ushort scan, uint flags) {
+          INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
+          i.U.ki = new KEYBDINPUT { wVk = vk, wScan = scan, dwFlags = flags };
+          return i;
+        }
+        public static int SelectAll() {
+          INPUT[] keys = { Key(0x11, 0, 0), Key(0x41, 0, 0), Key(0x41, 0, KEYEVENTF_KEYUP), Key(0x11, 0, KEYEVENTF_KEYUP) };
+          return (int)SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
+        }
+        public static int SendUnicode(string text) {
+          List<INPUT> keys = new List<INPUT>();
+          foreach (char c in text ?? "") { keys.Add(Key(0, c, KEYEVENTF_UNICODE)); keys.Add(Key(0, c, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)); }
+          if (keys.Count == 0) return 0;
+          INPUT[] input = keys.ToArray();
+          return (int)SendInput((uint)input.Length, input, Marshal.SizeOf(typeof(INPUT)));
+        }
+        public static int Enter() {
+          INPUT[] keys = { Key(0x0D, 0, 0), Key(0x0D, 0, KEYEVENTF_KEYUP) };
+          return (int)SendInput(2, keys, Marshal.SizeOf(typeof(INPUT)));
+        }
+        public static int ClickClient(IntPtr h, double xRatio, double yRatio) {
+          RECT r; if (!GetClientRect(h, out r)) return 0;
+          POINT p = new POINT { X = (int)Math.Round((r.Right - r.Left) * xRatio), Y = (int)Math.Round((r.Bottom - r.Top) * yRatio) };
+          if (!ClientToScreen(h, ref p) || !SetCursorPos(p.X, p.Y)) return 0;
+          INPUT down = new INPUT(); down.type = INPUT_MOUSE; down.U.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+          INPUT up = new INPUT(); up.type = INPUT_MOUSE; up.U.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+          INPUT[] clicks = { down, up };
+          return (int)SendInput(2, clicks, Marshal.SizeOf(typeof(INPUT)));
+        }
+      }
+"@
+
+    [NativeInput]::SetProcessDPIAware() | Out-Null
+    $h = [IntPtr]::Zero
+    $stable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
+    for ($i = 0; $i -lt 80; $i++) {
+      # Include every Riot-owned process; renderer/window executable names have
+      # changed across Riot Client releases.
+      [uint32[]]$pids = @(Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessName -like 'Riot*' } |
+        ForEach-Object { [uint32]$_.Id })
+      $candidate = [NativeInput]::FindRiotWindow($pids)
+      if ($candidate -ne [IntPtr]::Zero) {
+        $width = [NativeInput]::ClientWidth($candidate); $height = [NativeInput]::ClientHeight($candidate)
+        if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) { $stable++ } else { $stable = 0 }
+        $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
+        if ($stable -ge 2) { $h = $candidate; break }
+      }
+      Start-Sleep -Milliseconds 500
+    }
+    if ($h -eq [IntPtr]::Zero) { throw 'WINDOW_NOT_FOUND: no stable visible Riot login window appeared' }
+    [pscustomobject]@{
+      checkpoint = 'WINDOW_SELECTED'
+      processId = [NativeInput]::ProcessId($h)
+      windowClass = [NativeInput]::ClassName($h)
+      width = [NativeInput]::ClientWidth($h)
+      height = [NativeInput]::ClientHeight($h)
+    } | ConvertTo-Json -Compress | Write-Output
+
+    # A stable top-level HWND appears before Riot's Chromium form is hydrated.
+    # Let the sign-in UI finish rendering, then reacquire the current Riot HWND
+    # once in case Chromium replaced it during startup.
+    Start-Sleep -Milliseconds 4500
+    [uint32[]]$readyPids = @(Get-Process -ErrorAction SilentlyContinue |
+      Where-Object { $_.ProcessName -like 'Riot*' } |
+      ForEach-Object { [uint32]$_.Id })
+    $readyWindow = [NativeInput]::FindRiotWindow($readyPids)
+    if ($readyWindow -ne [IntPtr]::Zero) { $h = $readyWindow }
+    Write-Output '{"checkpoint":"FORM_SETTLE_WAIT_COMPLETE"}'
+
+    if (-not [NativeInput]::Activate($h)) { throw 'FOREGROUND_DENIED: Windows would not give focus to the ready Riot login window' }
+    Write-Output '{"checkpoint":"FOREGROUND_ACQUIRED"}'
+
+    if ([NativeInput]::ClickClient($h, 0.13, 0.295) -ne 2) { throw 'USERNAME_CLICK_FAILED: could not target the username field' }
+    Start-Sleep -Milliseconds 250
+    if ([NativeInput]::SelectAll() -ne 4) { throw 'USERNAME_SELECT_FAILED: native input was blocked' }
+    $expected = ([string]$creds.u).Length * 2
+    if ([NativeInput]::SendUnicode([string]$creds.u) -ne $expected) { throw 'USERNAME_INPUT_FAILED: Windows blocked native username input' }
+    Write-Output '{"checkpoint":"USERNAME_INPUT_INJECTED"}'
+
+    # Explicit mouse clicks target each field. Do not reacquire foreground here:
+    # Chromium may swap its top-level HWND while retaining the visible form.
+    Start-Sleep -Milliseconds 300
+    if ([NativeInput]::ClickClient($h, 0.13, 0.37) -ne 2) { throw 'PASSWORD_CLICK_FAILED: could not target the password field' }
+    Start-Sleep -Milliseconds 250
+    if ([NativeInput]::SelectAll() -ne 4) { throw 'PASSWORD_SELECT_FAILED: native input was blocked' }
+    $expected = ([string]$creds.p).Length * 2
+    if ([NativeInput]::SendUnicode([string]$creds.p) -ne $expected) { throw 'PASSWORD_INPUT_FAILED: Windows blocked native password input' }
+    Write-Output '{"checkpoint":"PASSWORD_INPUT_INJECTED"}'
+
+    # Fresh-login flows clear Riot's auth state, so the checkbox starts
+    # unchecked. Request persistence before submitting and click the form's
+    # arrow button directly so checkbox focus cannot consume an Enter key.
+    Start-Sleep -Milliseconds 300
+    if ([NativeInput]::ClickClient($h, 0.042, 0.495) -ne 2) { throw 'STAY_SIGNED_IN_FAILED: could not target the Stay signed in checkbox' }
+    Write-Output '{"checkpoint":"STAY_SIGNED_IN_CLICKED"}'
+    Start-Sleep -Milliseconds 300
+    if ([NativeInput]::ClickClient($h, 0.13, 0.75) -ne 2) { throw 'SUBMIT_FAILED: could not target the sign-in button' }
+    Write-Output '{"checkpoint":"SUBMIT_CLICKED"}'
+
+    [pscustomobject]@{
+      ok = $true
+      code = 'INPUT_SENT'
+      staySignedInClicked = $true
+      submittedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      processId = [NativeInput]::ProcessId($h)
+      windowClass = [NativeInput]::ClassName($h)
+      width = [NativeInput]::ClientWidth($h)
+      height = [NativeInput]::ClientHeight($h)
+    } | ConvertTo-Json -Compress
+  `;
+  const output = await ps(script, stdin, (line) => {
+    try {
+      const event = JSON.parse(line);
+      if (event && event.checkpoint) onDiagnostic(event);
+    } catch { /* non-checkpoint output is parsed below */ }
+  });
+  try {
+    const result = JSON.parse(output.split(/\r?\n/).filter(Boolean).pop());
+    if (!result.ok) throw new Error(result.code || 'Native login input failed.');
+    return result;
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error('INPUT_DIAGNOSTIC_FAILED: native input returned an unreadable result');
+    throw error;
+  }
+}
+
+/**
+ * Full switch: kill -> launch -> wait -> auto-login.
+ * @param {object} opts { clientPath, username, password, autoFill }
+ * @param {function} onStep progress callback(stepLabel)
+ */
+async function switchAccount({
+  clientPath,
+  username,
+  password,
+  loginMode = 'native-required',
+  configUrl = '',
+  game = null,
+  instant = false,
+  onBeforeLaunch = null,
+  verifyAccount = null,
+}, onStep = () => {}) {
+  const client = findRiotClient(clientPath);
+  if (!client) throw new Error('Riot Client not found. Open Settings › Riot Client and set the path to RiotClientServices.exe.');
+  if (loginMode === 'native-required' && !instant && !String(username || '').trim()) {
+    throw new Error('LOGIN_USERNAME_MISSING: Edit this roster entry and add its Riot login username before switching.');
+  }
+  if (loginMode === 'native-required' && !instant && !password) {
+    throw new Error('LOGIN_PASSWORD_MISSING: Edit this roster entry and save its password before switching.');
+  }
+  if (loginMode !== 'native-required' && !instant) {
+    throw new Error('AUTO_LOGIN_DISABLED: Enable “Auto-fill credentials on switch” in Settings before switching.');
+  }
+  const targetLabel = game && GAMES[game] ? GAMES[game].label : 'Riot Client';
+  const verify = async (phase = 'restore') => {
+    if (typeof verifyAccount !== 'function') return { status: 'timeout' };
+    try { return await verifyAccount({ phase }); }
+    catch (error) { return { status: 'timeout', reason: String(error && error.message ? error.message : error) }; }
+  };
+
+  onStep('Closing the current Riot session…');
+  await killRiotProcesses();
+  await delay(1500);
+  if (onBeforeLaunch) {
+    const preparation = await onBeforeLaunch(onStep);
+    if (preparation && preparation.instant === false) instant = false;
+    await delay(400);
+  }
+  if (!instant && loginMode !== 'native-required') {
+    throw new Error('AUTO_LOGIN_DISABLED: The saved session could not be restored and automatic login is disabled in Settings.');
+  }
+
+  onStep(configUrl ? `Launching ${targetLabel} (appearing offline)…` : `Launching ${targetLabel}…`);
+  launchClient(client, { game, configUrl });
+
+  let fallback = false;
+  let restoredVerification = null;
+  if (instant) {
+    onStep('Verifying the restored Riot session…');
+    restoredVerification = await verify();
+    if (restoredVerification.status === 'matched') {
+      onStep('Saved session verified — requested account is active.');
+      return { instant: true, fallback: false, verified: true, verification: restoredVerification };
+    }
+    if (restoredVerification.status === 'timeout') {
+      onStep('Riot is still starting; leaving it open without restarting.');
+      return {
+        instant: true,
+        fallback: false,
+        verified: false,
+        recoverable: true,
+        verification: restoredVerification,
+        reason: 'Riot did not expose a stable identity before the verification timeout.',
+      };
+    }
+    if (loginMode !== 'native-required') {
+      onStep('The saved session needs sign-in and automatic login is disabled.');
+      return {
+        instant: true,
+        fallback: false,
+        verified: false,
+        recoverable: true,
+        verification: restoredVerification,
+        manualRequired: true,
+        reason: 'AUTO_LOGIN_DISABLED: Saved session needs sign-in; enable automatic login in Settings.',
+      };
+    }
+
+    fallback = true;
+    if (restoredVerification.status === 'mismatched') {
+      // Only a stable, positively identified wrong account warrants a restart.
+      onStep('Restored session belongs to another account — reopening one clean sign-in form…');
+      await killRiotProcesses();
+      await delay(1200);
+      clearRiotSession();
+      launchClient(client, { game, configUrl });
+    } else {
+      // Expired snapshots already leave a usable login form open. Reuse it;
+      // killing/relaunching here caused the visible open/close/open loop.
+      onStep('Saved session needs sign-in — using the open Riot login form…');
+    }
+  }
+
+  if (!String(username || '').trim() || !password) {
+    const reason = !String(username || '').trim()
+      ? 'LOGIN_USERNAME_MISSING: Add the Riot login username to this roster entry.'
+      : 'LOGIN_PASSWORD_MISSING: Save the Riot password on this roster entry.';
+    onStep(reason);
+    return {
+      instant,
+      fallback,
+      verified: false,
+      recoverable: true,
+      verification: restoredVerification,
+      automationAttempted: false,
+      inputDelivered: false,
+      manualRequired: true,
+      reason,
+    };
+  }
+
+  onStep('Waiting for and targeting the Riot login form…');
+  try {
+    const input = await autoLogin(username, password, (event) => {
+      const extra = event.checkpoint === 'WINDOW_SELECTED'
+        ? ` pid=${event.processId} class=${event.windowClass} size=${event.width}x${event.height}`
+        : '';
+      onStep(`Native input: ${event.checkpoint}${extra}`);
+    });
+    onStep('Credentials submitted. Complete Riot 2FA or any verification challenge in the Riot Client if prompted…');
+    const verificationAvailable = typeof verifyAccount === 'function';
+    const verification = verificationAvailable ? await verify('post-login') : { status: 'timeout' };
+    const verified = verification.status === 'matched';
+    onStep(verified
+      ? 'Requested account verified.'
+      : (verification.status === 'mismatched'
+        ? 'Riot signed into a different identity; the switch was rejected.'
+        : 'Input was delivered, but Riot has not confirmed the requested account yet.'));
+    return {
+      instant: false,
+      fallback,
+      verified,
+      recoverable: !verified && verification.status !== 'mismatched',
+      awaitingUserVerification: !verified && (verification.status === 'unauthenticated' || verification.status === 'timeout'),
+      verification,
+      verificationAvailable,
+      automationAttempted: true,
+      inputDelivered: true,
+      loginSubmitted: true,
+      staySignedInClicked: !!input.staySignedInClicked,
+      submittedAt: Number(input.submittedAt || Date.now()),
+      manualRequired: false,
+      inputCode: input.code,
+      inputWindow: {
+        processId: input.processId,
+        windowClass: input.windowClass,
+        width: input.width,
+        height: input.height,
+      },
+    };
+  } catch (e) {
+    const reason = String(e && e.message ? e.message : e).slice(0, 180);
+    onStep(`Automatic form input failed (${reason}).`);
+    return {
+      instant: false,
+      fallback,
+      verified: false,
+      verification: restoredVerification,
+      verificationAvailable: typeof verifyAccount === 'function',
+      automationAttempted: true,
+      inputDelivered: false,
+      loginSubmitted: false,
+      staySignedInClicked: false,
+      manualRequired: true,
+      reason,
+    };
+  }
+}
+
+module.exports = { switchAccount, launchClient, killRiotProcesses, findRiotClient, clearRiotSession, GAMES };

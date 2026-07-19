@@ -1,0 +1,44 @@
+appId: com.riotrelay.desktop
+productName: Riot Relay
+copyright: Copyright © 2026 Riot Relay contributors
+asar: true
+compression: normal
+directories:
+  output: dist
+  buildResources: build
+files:
+  - electron/**/*
+  - renderer/**/*
+  - build/icon.ico
+  - build/icon.png
+  - images.jfif
+  - THIRD_PARTY_NOTICES.md
+  - package.json
+  - "!test/**/*"
+  - "!docs/**/*"
+  - "!.github/**/*"
+  - "!**/*.map"
+win:
+  icon: build/icon.ico
+  legalTrademarks: Riot Relay is an unofficial community application and is not endorsed by Riot Games.
+publish:
+  provider: github
+  owner: JirkaachS
+  repo: Riot-Relay
+  releaseType: release
+nsis:
+  artifactName: Riot-Relay-Setup-${version}-x64.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Riot Relay
+  deleteAppDataOnUninstall: false
+msi:
+  artifactName: Riot-Relay-${version}-x64.${ext}
+  oneClick: false
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Riot Relay

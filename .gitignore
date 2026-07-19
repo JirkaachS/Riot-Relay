@@ -1,0 +1,54 @@
+# Dependencies and generated output
+node_modules/
+dist/
+release/
+out/
+*.asar.unpacked/
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+secrets/
+
+# Riot Relay local state (never commit user/account data)
+user-data/
+userdata/
+**/vault.dat
+**/vault.key
+**/vault.key.mode
+**/sessions.json
+**/session-data.json
+**/settings.json
+**/accounts.json
+**/Local Storage/
+**/Session Storage/
+**/Cookies
+**/Cookies-journal
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Keep source-controlled build assets such as build/icon.*
+!build/
+!build/icon.*
