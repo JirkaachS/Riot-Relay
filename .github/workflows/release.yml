@@ -35,6 +35,10 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           $tag = $env:GITHUB_REF_NAME
+          $expectedTag = "v${version}"
+          if ($tag -ne $expectedTag) {
+            throw "Release tag '${tag}' does not match package version '${version}' (expected '${expectedTag}')."
+          }
           $assets = @(
             "dist/Riot-Relay-Setup-${version}-x64.exe",
             "dist/Riot-Relay-Setup-${version}-x64.exe.blockmap",

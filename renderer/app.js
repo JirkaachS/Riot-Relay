@@ -34,7 +34,7 @@ const state = {
   activity: [],
   rankIcons: {},
   settings: {},
-  updates: { status: 'idle', currentVersion: '1.3.1', availableVersion: null, progress: 0 },
+  updates: { status: 'idle', currentVersion: '1.3.2', availableVersion: null, progress: 0 },
   inventory: null,
   games: [{ id: 'valorant', label: 'VALORANT' }],
   inv: { section: 'Skin', exportSel: new Set(['Skin']), search: '', tier: '', accSearch: '', game: 'valorant' },
@@ -1509,7 +1509,7 @@ function renderUpdateState(updateState) {
   const previousStatus = lastUpdateStatus;
   state.updates = { ...state.updates, ...updateState };
   lastUpdateStatus = state.updates.status;
-  const version = String(state.updates.currentVersion || '1.3.1');
+  const version = String(state.updates.currentVersion || '1.3.2');
   const available = String(state.updates.availableVersion || '');
   const progress = Math.max(0, Math.min(100, Number(state.updates.progress) || 0));
   $('#app-version-title').textContent = version;

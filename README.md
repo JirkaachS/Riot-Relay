@@ -2,7 +2,7 @@
 
 Riot Relay is a Windows account command center for Riot games: encrypted credentials, identity-bound sessions, deliberate account switching, unified account data, inventory tools, current-session chat, and privacy-first presence controls.
 
-**Version 1.3.1** · [Documentation](https://jirkaachs.github.io/Riot-Relay/) · [Latest release](https://github.com/JirkaachS/Riot-Relay/releases/latest) · [Security](https://jirkaachs.github.io/Riot-Relay/security.html) · [Privacy](https://jirkaachs.github.io/Riot-Relay/privacy.html)
+**Version 1.3.2** · [Documentation](https://jirkaachs.github.io/Riot-Relay/) · [Latest release](https://github.com/JirkaachS/Riot-Relay/releases/latest) · [Security](https://jirkaachs.github.io/Riot-Relay/security.html) · [Privacy](https://jirkaachs.github.io/Riot-Relay/privacy.html)
 
 ## What it protects
 
@@ -30,7 +30,7 @@ npm test
 npm start
 ```
 
-Tagged releases are designed to run tests and invoke `npm run release:nsis` and `npm run release:msi` for Windows x64 publishing. Those scripts are the repository’s release-build interface; a checkout must define them before its release workflow can succeed. The workflow uses the tag-triggered GitHub token and does not imply code signing.
+Tagged releases run tests, build the Windows x64 NSIS and MSI artifacts with `npm run dist:nsis` and `npm run dist:msi`, and then publish all release assets together through GitHub CLI. The workflow verifies that the pushed tag matches the package version. GitHub's tag-triggered token is used only for release publication and does not imply code signing.
 
 ## Updates and network behavior
 
