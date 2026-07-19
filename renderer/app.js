@@ -34,7 +34,7 @@ const state = {
   activity: [],
   rankIcons: {},
   settings: {},
-  updates: { status: 'idle', currentVersion: '1.3.0', availableVersion: null, progress: 0 },
+  updates: { status: 'idle', currentVersion: '1.3.1', availableVersion: null, progress: 0 },
   inventory: null,
   games: [{ id: 'valorant', label: 'VALORANT' }],
   inv: { section: 'Skin', exportSel: new Set(['Skin']), search: '', tier: '', accSearch: '', game: 'valorant' },
@@ -468,8 +468,14 @@ const LEAGUE_RANK_COLORS = {
   EMERALD: '#3fbb78', DIAMOND: '#6b82d8', MASTER: '#9a62c7', GRANDMASTER: '#d4545b', CHALLENGER: '#d1ad5c',
   UNRANKED: '#555762',
 };
+function gameErrorMessage(game) {
+  const message = String(game && game.error || 'Unavailable').trim();
+  return /^(?:ReferenceError:\s*)?path is not defined$/i.test(message)
+    ? 'Previous sync failed before data could be read. Sync again to retry.'
+    : message;
+}
 function rankedRows(game) {
-  if (!game || !game.available) return `<div class="game-stat__empty">${escapeHtml((game && game.error) || 'Unavailable')}</div>`;
+  if (!game || !game.available) return `<div class="game-stat__empty">${escapeHtml(gameErrorMessage(game))}</div>`;
   if (!game.queues || !game.queues.length) return '<div class="game-stat__empty">No ranked placements found</div>';
   return `<div class="rank-cards">${game.queues.map((q) => {
     const tier = String(q.tier || 'UNRANKED').toUpperCase();
@@ -905,7 +911,8 @@ async function checkClientStatus() {
       state.currentSession = current;
       state.stats = current.stats || null;
       updateStatusBar();
-      if (changed) { renderAccounts(); renderDetail(); }
+      if (changed) renderAccounts();
+      renderDetail();
       if (state.activeView === 'chat' && !state.chat.timer) startChatPolling();
     } catch {
       // A running client on its sign-in screen is not an authenticated session.
@@ -1502,7 +1509,7 @@ function renderUpdateState(updateState) {
   const previousStatus = lastUpdateStatus;
   state.updates = { ...state.updates, ...updateState };
   lastUpdateStatus = state.updates.status;
-  const version = String(state.updates.currentVersion || '1.3.0');
+  const version = String(state.updates.currentVersion || '1.3.1');
   const available = String(state.updates.availableVersion || '');
   const progress = Math.max(0, Math.min(100, Number(state.updates.progress) || 0));
   $('#app-version-title').textContent = version;

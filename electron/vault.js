@@ -21,6 +21,22 @@ const path = require('path');
 
 const SCRYPT_PARAMS = { N: 1 << 15, r: 8, p: 1, keylen: 32 };
 const MAGIC = 'VNGRD1';
+const LEGACY_TFT_RUNTIME_ERRORS = new Set(['path is not defined', 'referenceerror: path is not defined']);
+
+function sanitizeStats(stats) {
+  if (!stats || typeof stats !== 'object' || !stats.tft || typeof stats.tft !== 'object') return stats;
+  const tft = stats.tft;
+  const queues = Array.isArray(tft.queues) ? tft.queues : [];
+  const error = String(tft.error || '').trim().toLowerCase();
+  if (tft.available === true || queues.length || !LEGACY_TFT_RUNTIME_ERRORS.has(error)) return stats;
+  return {
+    ...stats,
+    tft: {
+      ...tft,
+      error: 'Previous TFT sync failed before data could be read. Sync again to retry.',
+    },
+  };
+}
 
 class Vault {
   /**
@@ -107,6 +123,9 @@ class Vault {
   _normalizedData(value) {
     const data = value && typeof value === 'object' ? value : {};
     if (!Array.isArray(data.accounts)) data.accounts = [];
+    data.accounts = data.accounts.map((account) => account && typeof account === 'object'
+      ? { ...account, stats: sanitizeStats(account.stats) }
+      : account);
     if (!data.capabilities || typeof data.capabilities !== 'object') data.capabilities = {};
     const legacyMode = data.capabilities.osKeyStorage === true ? 'os' : 'disabled';
     const requestedMode = String(data.capabilities.osKeyMode || legacyMode);
@@ -394,7 +413,9 @@ class Vault {
   patchAccount(id, patch) {
     const idx = this.data.accounts.findIndex((a) => a.id === id);
     if (idx < 0) return this.listAccounts();
-    this.data.accounts[idx] = { ...this.data.accounts[idx], ...patch, updatedAt: new Date().toISOString() };
+    const safePatch = { ...patch };
+    if (Object.prototype.hasOwnProperty.call(safePatch, 'stats')) safePatch.stats = sanitizeStats(safePatch.stats);
+    this.data.accounts[idx] = { ...this.data.accounts[idx], ...safePatch, updatedAt: new Date().toISOString() };
     this._persist();
     return this.listAccounts();
   }
