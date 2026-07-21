@@ -135,6 +135,7 @@ const DEFAULT_SETTINGS = {
   deceiveLeagueHelper: true,
   hideLoginNames: false,
   hideDisplayNames: false,
+  showRosterRankBorders: true,
   featureTutorialVersion: 0,
 };
 
@@ -627,6 +628,13 @@ function annotate(accounts) {
       hasSession: sessionStatus.available && sessionStatus.identityVerified,
     };
   });
+}
+
+function rosterState() {
+  return {
+    accounts: annotate(vault.listAccounts()),
+    sections: vault.listRosterSections(),
+  };
 }
 
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -1504,13 +1512,17 @@ async function verifyActiveAccount(account, timeoutMs = 30000, allowUserVerifica
           if (wrongSamples >= 3) return { status: 'mismatched', live };
         }
       }
-    } catch {
+    } catch (error) {
       matchedPuuid = null;
       matchedSamples = 0;
-      // A persistent lockfile with no entitlements/session is the signed-out
-      // login form. Repeated samples avoid treating normal startup as an auth
-      // failure while the client is still coming up.
-      unauthenticatedSamples = riot.isRunning() ? unauthenticatedSamples + 1 : 0;
+      // Only repeated explicit auth rejection (401/404) proves a restored
+      // snapshot is expired. Missing lockfiles, endpoint startup failures, and
+      // transient transport errors must run to the timeout and leave Riot open
+      // rather than triggering premature credential fallback.
+      const explicitlySignedOut = error && error.code === 'RIOT_NOT_AUTHENTICATED';
+      unauthenticatedSamples = explicitlySignedOut && riot.isRunning()
+        ? unauthenticatedSamples + 1
+        : 0;
       const requiredSamples = 12;
       if (!allowUserVerification && unauthenticatedSamples >= requiredSamples) {
         return { status: 'unauthenticated' };
@@ -1698,6 +1710,7 @@ handle('accounts:upsert', async (account) => {
     label: String(input.label || '').trim(),
     username: String(input.username || '').trim(),
     password: String(input.password || ''),
+    sectionId: input.sectionId ? String(input.sectionId) : null,
   };
   return annotate(vault.upsertAccount(editable));
 });
@@ -1713,6 +1726,47 @@ handle('accounts:toggle-favorite', async (id) => {
   const list = vault.listAccounts();
   const acc = list.find((a) => a.id === id);
   return annotate(vault.patchAccount(id, { favorite: !(acc && acc.favorite) }));
+});
+
+handle('roster:get', async () => {
+  requireUnlocked();
+  return rosterState();
+});
+
+handle('roster:section-create', async ({ name } = {}) => {
+  requireUnlocked();
+  vault.createRosterSection(name);
+  return rosterState();
+});
+
+handle('roster:section-rename', async ({ id, name } = {}) => {
+  requireUnlocked();
+  vault.renameRosterSection(String(id || ''), name);
+  return rosterState();
+});
+
+handle('roster:section-remove', async ({ id } = {}) => {
+  requireUnlocked();
+  vault.removeRosterSection(String(id || ''));
+  return rosterState();
+});
+
+handle('roster:section-hidden', async ({ id, hidden } = {}) => {
+  requireUnlocked();
+  vault.setRosterSectionHidden(String(id || ''), hidden === true);
+  return rosterState();
+});
+
+handle('roster:account-hidden', async ({ id, hidden } = {}) => {
+  requireUnlocked();
+  vault.setAccountRosterHidden(String(id || ''), hidden === true);
+  return rosterState();
+});
+
+handle('roster:show-all', async () => {
+  requireUnlocked();
+  vault.showAllRosterItems();
+  return rosterState();
 });
 
 // Save only a session whose live PUUID is explicitly linked to this entry.
@@ -1980,6 +2034,10 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
         step(snapshot.reason === 'legacy' ? 'Legacy session requires recapture — signing in normally…' : 'Preparing a clean sign-in…');
         clearRiotSession();
         return { instant: false };
+      },
+      onRestoredSessionRejected: async (_verification, step) => {
+        session.removeSession(userData, id);
+        step('Riot rejected the saved session; it was removed and will be replaced after a verified sign-in.');
       },
       onBeforeGameLaunch: requestedGame ? async (step) => {
         step('Waiting for the verified Riot friends session before product launch…');

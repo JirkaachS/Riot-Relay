@@ -160,6 +160,12 @@ const api = {
     list: () => ok(accounts), upsert: () => ok(accounts), remove: () => ok(accounts),
     toggleFavorite: () => ok(accounts),
   },
+  roster: {
+    get: () => ok({ accounts, sections: [] }),
+    createSection: () => ok({ accounts, sections: [] }), renameSection: () => ok({ accounts, sections: [] }),
+    removeSection: () => ok({ accounts, sections: [] }), setSectionHidden: () => ok({ accounts, sections: [] }),
+    setAccountHidden: () => ok({ accounts, sections: [] }), showAll: () => ok({ accounts, sections: [] }),
+  },
   riot: {
     isRunning: () => ok(true), currentSession: () => ok(currentSession), allStats: () => ok(stats),
     refreshAccount: () => ok({ accounts, currentSession, stats }), switch: () => ok({}), onSwitchProgress: noop,

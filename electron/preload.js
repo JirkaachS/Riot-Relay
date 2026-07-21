@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld('api', {
     toggleFavorite: (id) => invoke('accounts:toggle-favorite', id),
   },
 
+  // Encrypted roster organization
+  roster: {
+    get: () => invoke('roster:get'),
+    createSection: (name) => invoke('roster:section-create', { name }),
+    renameSection: (id, name) => invoke('roster:section-rename', { id, name }),
+    removeSection: (id) => invoke('roster:section-remove', { id }),
+    setSectionHidden: (id, hidden) => invoke('roster:section-hidden', { id, hidden }),
+    setAccountHidden: (id, hidden) => invoke('roster:account-hidden', { id, hidden }),
+    showAll: () => invoke('roster:show-all'),
+  },
+
   // Riot live data + switching
   riot: {
     isRunning: () => invoke('riot:is-running'),

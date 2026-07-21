@@ -679,6 +679,23 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .arow.is-favorite:not(.is-active) { border-left-color: rgba(214,165,74,.45); }
 .arow.is-signed-in { border-left-color: #50cfa8; background-image: linear-gradient(90deg, rgba(80,207,168,.1), transparent 52%); }
 .arow.is-signed-in:hover { background-color: #171c1b; }
+.arow.has-rank-border::after { content: ''; position: absolute; inset: 0; z-index: 2; border: 1px solid color-mix(in srgb, var(--roster-rank-accent) 72%, transparent); border-left-width: 3px; border-radius: 3px; box-shadow: inset 0 0 12px color-mix(in srgb, var(--roster-rank-accent) 11%, transparent), 0 0 7px color-mix(in srgb, var(--roster-rank-accent) 10%, transparent); pointer-events: none; }
+.roster-head-actions { display: flex; align-items: center; gap: 4px; }
+.roster-head-btn { min-height: 22px; padding: 0 6px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 700 8px Inter, sans-serif; cursor: pointer; }
+.roster-head-btn:hover { border-color: #454550; color: var(--text); }
+.roster-hidden { max-height: 190px; margin: 0 7px 7px; overflow-y: auto; border: 1px solid #34343d; background: #111115; }
+.roster-hidden__head, .roster-hidden__item { min-height: 28px; padding: 5px 7px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--line-soft); }
+.roster-hidden__head strong, .roster-hidden__item span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.roster-hidden__head button, .roster-hidden__item button, .roster-section__actions button { padding: 3px 5px; border: 1px solid #34343d; border-radius: 2px; background: #19191f; color: #9b9ba8; font: 700 8px Inter, sans-serif; cursor: pointer; }
+.roster-hidden__head button:hover, .roster-hidden__item button:hover, .roster-section__actions button:hover { border-color: #555561; color: #eeeef3; }
+.roster-section { margin-bottom: 7px; }
+.roster-section__head { min-height: 24px; padding: 3px 5px 3px 7px; display: flex; align-items: center; gap: 6px; color: #777783; }
+.roster-section__head > strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 8.5px; letter-spacing: .5px; text-transform: uppercase; }
+.roster-section__head > span { font-size: 8px; font-weight: 700; }
+.roster-section__actions { display: flex; gap: 2px; opacity: .35; transition: opacity .12s; }
+.roster-section:hover .roster-section__actions { opacity: 1; }
+.roster-section__actions button { width: 20px; height: 20px; padding: 0; display: grid; place-items: center; }
+.roster-empty { padding: 16px; text-align: center; font-size: 10px; }
 .arow__av { position: relative; width: 34px; height: 34px; overflow: hidden; border: 1px solid #34343e; border-radius: 6px; background: #1b1b21; color: #777782; font-size: 10px; }
 .arow__av span, .detail__av span { position: absolute; inset: 0; display: grid; place-items: center; }
 .arow__av img, .detail__av img { position: absolute; inset: 0; z-index: 1; display: block; width: 100%; height: 100%; object-fit: cover; }
