@@ -689,11 +689,7 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .arow__rank-frame { position: absolute; inset: 0; z-index: 1; overflow: hidden; border-radius: 3px; pointer-events: none; }
 .arow__rank-frame img { position: absolute; display: block; pointer-events: none; }
 .arow__rank-frame img[hidden], [data-rank-asset][hidden] { display: none; }
-.arow__rank-crest { width: 42px; height: 42px; top: 50%; right: 2px; object-fit: contain; opacity: .09; transform: translateY(-50%); filter: saturate(.8) drop-shadow(0 0 4px var(--roster-rank-accent)); }
-.arow__rank-wings { width: 116px; height: 72px; top: 50%; right: -26px; object-fit: contain; opacity: .2; transform: translateY(-50%); filter: saturate(.9) drop-shadow(0 0 5px color-mix(in srgb, var(--roster-rank-accent) 42%, transparent)); }
-.arow__rank-accent { top: 3px; bottom: 3px; width: 31px; height: calc(100% - 6px); object-fit: fill; opacity: .58; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--roster-rank-accent) 34%, transparent)); }
-.arow__rank-accent--left { left: -3px; }
-.arow__rank-accent--right { right: -3px; }
+.arow__rank-crest { width: 40px; height: 40px; top: 50%; right: 6px; object-fit: contain; opacity: .16; transform: translateY(-50%); filter: saturate(.85) drop-shadow(0 0 4px var(--roster-rank-accent)); }
 .arow.has-rank-border > :not(.arow__rank-frame) { position: relative; z-index: 3; }
 .roster-head-actions { display: flex; align-items: center; gap: 4px; }
 .roster-head-btn { min-height: 22px; padding: 0 6px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 700 8px Inter, sans-serif; cursor: pointer; }

@@ -26,20 +26,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## League ranked artwork
 
-League and TFT rank emblems, roster wing plates, and border accents are loaded
-from [CommunityDragon](https://www.communitydragon.org/)'s pinned `16.14` distribution of
-`plugins/rcp-fe-lol-static-assets/global/default`. Riot Relay uses the
-`ranked-emblem/emblem-{tier}.png`,
-`ranked-emblem/wings/wings_{tier}_plate.png`, `border-accent-left.svg`, and
-`border-accent-right.svg` paths. CommunityDragon distributes extracted client
-assets for developer access; the underlying ranked artwork remains owned by
-Riot Games and is not presented as CommunityDragon-authored artwork.
+League and TFT rank emblems shown on roster accounts are loaded from
+[CommunityDragon](https://www.communitydragon.org/)'s pinned `16.14` distribution of
+`plugins/rcp-fe-lol-static-assets/global/default`, using the classic single-crest
+`ranked-emblem/emblem-{tier}.png` path only (no wing-plate or border-accent
+overlays). CommunityDragon distributes extracted client assets for developer
+access; the underlying ranked artwork remains owned by Riot Games and is not
+presented as CommunityDragon-authored artwork.
 
-`renderer/emerald-rank.jfif` is the maintainer-supplied lower, complete teal
-Emerald crest and is the sole local exception for tier emblems. It is used in
-place of CommunityDragon's Emerald emblem while the other decorative Emerald
-assets remain pinned to CommunityDragon `16.14`. CSS gradients and glows provide
-a fallback if remote decorative artwork is unavailable.
+`renderer/emerald-rank.png` is the maintainer-supplied Emerald crest and is the
+sole local exception for tier emblems, used in place of CommunityDragon's
+Emerald emblem. CSS gradients and glows provide a fallback if remote
+decorative artwork is unavailable.
 
 ## Product disclaimer
 

@@ -947,7 +947,7 @@ const LEAGUE_RANK_COLORS = {
 const LEAGUE_EMBLEM_TIERS = new Set(['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'grandmaster', 'challenger']);
 const COMMUNITYDRAGON_RANK_BASE = 'https://raw.communitydragon.org/16.14/plugins/rcp-fe-lol-static-assets/global/default';
 const LEAGUE_EMBLEM_BASE = `${COMMUNITYDRAGON_RANK_BASE}/ranked-emblem`;
-const LEAGUE_EMERALD_ASSET = '/renderer/emerald-rank.jfif';
+const LEAGUE_EMERALD_ASSET = '/renderer/emerald-rank.png';
 function gameMark(game) {
   const paths = {
     valorant: '<path d="M3 4l10.2 18h5.1l-4.6-7.9L8.4 6.8 3 4Zm26 0L18.7 22h5.2l5.1-8.2V4Z"/>',
@@ -1020,8 +1020,13 @@ function rankedRows(game, gameId) {
     </article>`;
   }).join('')}</div>`;
 }
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function trustedRankSeason(value) {
-  return /^(?=.{1,64}$)(?=.*\d)[a-z0-9][a-z0-9 ._-]*$/i.test(String(value || '').trim());
+  const season = String(value || '').trim();
+  // A bare UUID (Riot's raw internal season/act key) is never a presentable
+  // label on its own; it must have been translated to a human name upstream.
+  if (UUID_SHAPE.test(season)) return false;
+  return /^(?=.{1,64}$)(?=.*\d)[a-z0-9][a-z0-9 ._-]*$/i.test(season);
 }
 function seasonLabel(value, index, gameId) {
   const season = String(value || '').trim();
@@ -1038,8 +1043,10 @@ function rankHistory(history, gameId) {
   // Old provider fragments without a recognizable season identity were once
   // persisted as numbered League/TFT history. Filter them at render time too,
   // so false seasons disappear immediately without requiring another sync.
+  // VALORANT rows must have an already-resolved human act `label`; a bare
+  // UUID seasonId is never shown directly (see seasonLabel/UUID_SHAPE).
   const verifiedSource = gameId === 'valorant'
-    ? source
+    ? source.filter((row) => row && row.label && !UUID_SHAPE.test(String(row.label).trim()))
     : source.filter((row) => row && trustedRankSeason(row.label || row.seasonId));
   const rows = (gameId === 'valorant' ? [...verifiedSource].reverse() : [...verifiedSource]).slice(0, 8);
   const verifiedCopy = gameId === 'valorant' ? '' : 'verified ';
@@ -1200,11 +1207,11 @@ function rosterRankFrame(rank) {
   const tier = rosterArtworkTier(rank);
   if (!tier) return '';
   const crestSource = tier === 'emerald' ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/emblem-${tier}.png`;
+  // The plain classic per-tier crest only. Layered wing-plate splash art and
+  // border-accent overlays were removed: at roster-row size they rendered as
+  // oversized, distorted artwork rather than a clean badge.
   return `<span class="arow__rank-frame" aria-hidden="true">
     <img class="arow__rank-crest" data-rank-asset src="${crestSource}" alt="" loading="lazy" decoding="async" />
-    <img class="arow__rank-wings" data-rank-asset src="${LEAGUE_EMBLEM_BASE}/wings/wings_${tier}_plate.png" alt="" loading="lazy" decoding="async" />
-    <img class="arow__rank-accent arow__rank-accent--left" data-rank-asset src="${COMMUNITYDRAGON_RANK_BASE}/border-accent-left.svg" alt="" loading="lazy" decoding="async" />
-    <img class="arow__rank-accent arow__rank-accent--right" data-rank-asset src="${COMMUNITYDRAGON_RANK_BASE}/border-accent-right.svg" alt="" loading="lazy" decoding="async" />
   </span>`;
 }
 function accountRow(a, signedIn = false) {
@@ -1249,10 +1256,16 @@ async function changeRoster(request, success) {
     if (success) toast(success, 'good');
   } catch (error) { toast(error.message, 'bad'); }
 }
-function sortedRosterAccounts(accounts) {
-  return [...accounts].sort((a, b) => Number(a.rosterOrder) - Number(b.rosterOrder)
-    || String(a.label || a.username || '').localeCompare(String(b.label || b.username || ''))
-    || String(a.id || '').localeCompare(String(b.id || '')));
+function sortedRosterAccounts(accounts, currentIds = null) {
+  return [...accounts].sort((a, b) => {
+    if (currentIds) {
+      const currentDiff = Number(currentIds.has(b.id)) - Number(currentIds.has(a.id));
+      if (currentDiff) return currentDiff;
+    }
+    return Number(a.rosterOrder) - Number(b.rosterOrder)
+      || String(a.label || a.username || '').localeCompare(String(b.label || b.username || ''))
+      || String(a.id || '').localeCompare(String(b.id || ''));
+  });
 }
 function clearRosterDropIndicators(root) {
   $$('.is-drag-over, .is-drop-before, .is-drop-after', root).forEach((element) => {
@@ -1329,7 +1342,7 @@ function renderAccounts() {
   const groups = state.rosterSections.filter((section) => !section.rosterHidden)
     .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
     .map((section) => ({ section, accounts: sortedRosterAccounts(filtered.filter((account) => account.sectionId === section.id), currentIds) }));
-  const unsectioned = sortedRosterAccounts(filtered.filter((account) => !account.sectionId));
+  const unsectioned = sortedRosterAccounts(filtered.filter((account) => !account.sectionId), currentIds);
   const renderedGroups = groups.filter((group) => group.accounts.length || !q);
   if (!q || unsectioned.length) renderedGroups.push({ section: null, accounts: unsectioned });
   const visibleCount = renderedGroups.reduce((sum, group) => sum + group.accounts.length, 0);
@@ -2356,6 +2369,7 @@ async function loadSettings() {
   state.startup = startup;
   $('#set-client-path').value = s.clientPath || '';
   $('#set-autofill').checked = !!s.autoFill;
+  $('#set-auto-sync').checked = s.autoSyncAfterLogin !== false;
   $('#set-minimize').checked = !!s.minimizeOnSwitch;
   $('#set-minimize-tray').checked = s.minimizeToTray !== false;
   renderStartupState(startup);
@@ -2654,6 +2668,7 @@ async function refreshCatalogStatus() {
 async function setSetting(patch) { state.settings = unwrap(await api.settings.set(patch)); }
 $('#set-client-path').addEventListener('change', (e) => setSetting({ clientPath: e.target.value.trim() }));
 $('#set-autofill').addEventListener('change', (e) => setSetting({ autoFill: e.target.checked }));
+$('#set-auto-sync').addEventListener('change', (e) => setSetting({ autoSyncAfterLogin: e.target.checked }));
 $('#set-minimize').addEventListener('change', (e) => setSetting({ minimizeOnSwitch: e.target.checked }));
 $('#set-minimize-tray').addEventListener('change', async (event) => {
   await setSetting({ minimizeToTray: event.target.checked });
