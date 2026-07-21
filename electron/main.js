@@ -135,7 +135,7 @@ const DEFAULT_SETTINGS = {
   deceiveLeagueHelper: true,
   hideLoginNames: false,
   hideDisplayNames: false,
-  showRosterRankBorders: true,
+  showRosterRankBorders: false,
   featureTutorialVersion: 0,
 };
 
@@ -1074,6 +1074,33 @@ function storedLeaguePlatformForLive(live) {
   return { platformId, platformSource, platformVerifiedAt };
 }
 
+function preserveTrustedPastSeasons(section, game, live, providerSucceeded, failureReason) {
+  if (providerSucceeded || !failureReason || !section || !live || !live.puuid
+    || (Array.isArray(section.pastSeasons) && section.pastSeasons.length)) return section;
+  const platformId = league.canonicalLeaguePlatform(section.platformId);
+  if (!platformId || !vault || !vault.isUnlocked()) return section;
+  const account = vault.listAccounts().find((item) => {
+    const candidate = item && item.stats && item.stats[game];
+    return exactPuuidMatch(item && item.puuid, live.puuid)
+      && candidate && exactPuuidMatch(candidate.puuid, live.puuid)
+      && league.canonicalLeaguePlatform(candidate.platformId) === platformId;
+  });
+  const prior = account && account.stats && account.stats[game];
+  if (!prior) return section;
+  const trusted = (Array.isArray(prior.pastSeasons) ? prior.pastSeasons : [])
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row)
+      && /^(?=.{1,64}$)(?=.*\d)[a-z0-9][a-z0-9 ._-]*$/i.test(String(row.seasonId || row.label || '').trim()))
+    .slice(0, 20)
+    .map((row) => ({ ...row }));
+  if (!trusted.length) return section;
+  return {
+    ...section,
+    pastSeasons: trusted,
+    historyStale: true,
+    historyStaleReason: safeError(failureReason, `${game === 'league' ? 'League' : 'TFT'} history provider failed; showing the last verified history.`),
+  };
+}
+
 function storedValorantRankForLive(live) {
   if (!vault || !vault.isUnlocked() || !live || !live.puuid) return null;
   const account = vault.listAccounts().find((item) => sameIdentity(item.puuid, live.puuid));
@@ -1325,6 +1352,13 @@ async function buildAllStats(live) {
       error: onlineTftError || lcuError || 'League client is unavailable for TFT data.',
     };
   }
+
+  const leagueHistoryFailure = opggIdentityError
+    || (opggResult.error && safeError(opggResult.error, 'OP.GG League history is unavailable.'));
+  const tftHistoryFailure = onlineTftIdentityError
+    || (onlineTftResult.error && safeError(onlineTftResult.error, 'OP.GG TFT history is unavailable.'));
+  leagueStats = preserveTrustedPastSeasons(leagueStats, 'league', live, !!verifiedOpgg, leagueHistoryFailure);
+  tftStats = preserveTrustedPastSeasons(tftStats, 'tft', live, !!verifiedOnlineTft, tftHistoryFailure);
 
   return { valorant, league: leagueStats, tft: tftStats };
 }
@@ -1748,6 +1782,18 @@ handle('roster:section-rename', async ({ id, name } = {}) => {
 handle('roster:section-remove', async ({ id } = {}) => {
   requireUnlocked();
   vault.removeRosterSection(String(id || ''));
+  return rosterState();
+});
+
+handle('roster:sections-reorder', async ({ orderedIds } = {}) => {
+  requireUnlocked();
+  vault.reorderRosterSections(orderedIds);
+  return rosterState();
+});
+
+handle('roster:account-move', async ({ accountId, sectionId, targetIndex } = {}) => {
+  requireUnlocked();
+  vault.moveAccountToRosterSection(String(accountId || ''), sectionId, targetIndex);
   return rosterState();
 });
 

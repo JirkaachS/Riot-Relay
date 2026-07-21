@@ -24,18 +24,22 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-## League ranked emblems
+## League ranked artwork
 
-League and TFT rank cards load Riot's ranked-emblem artwork from the
-[magisteriis/lol-icons-and-emblems](https://github.com/magisteriis/lol-icons-and-emblems)
-archive through jsDelivr. The archive identifies the artwork as originating from
-Riot's developer assets and publishes the mirror under the Unlicense. Riot Relay
-pins the archive revision and provides a generated fallback when an image is
-unavailable.
+League and TFT rank emblems, roster wing plates, and border accents are loaded
+from [CommunityDragon](https://www.communitydragon.org/)'s pinned `16.14` distribution of
+`plugins/rcp-fe-lol-static-assets/global/default`. Riot Relay uses the
+`ranked-emblem/emblem-{tier}.png`,
+`ranked-emblem/wings/wings_{tier}_plate.png`, `border-accent-left.svg`, and
+`border-accent-right.svg` paths. CommunityDragon distributes extracted client
+assets for developer access; the underlying ranked artwork remains owned by
+Riot Games and is not presented as CommunityDragon-authored artwork.
 
-Because that pre-Emerald archive has no Emerald tier, `renderer/emerald-rank.jfif`
-is the custom Emerald artwork supplied by the project maintainer. It is stored
-locally and used only for the Emerald tier fallback.
+`renderer/emerald-rank.jfif` is the maintainer-supplied lower, complete teal
+Emerald crest and is the sole local exception for tier emblems. It is used in
+place of CommunityDragon's Emerald emblem while the other decorative Emerald
+assets remain pinned to CommunityDragon `16.14`. CSS gradients and glows provide
+a fallback if remote decorative artwork is unavailable.
 
 ## Product disclaimer
 

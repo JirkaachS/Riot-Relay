@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld('api', {
     createSection: (name) => invoke('roster:section-create', { name }),
     renameSection: (id, name) => invoke('roster:section-rename', { id, name }),
     removeSection: (id) => invoke('roster:section-remove', { id }),
+    reorderSections: (orderedIds) => invoke('roster:sections-reorder', { orderedIds }),
+    moveAccount: (accountId, sectionId, targetIndex) => invoke('roster:account-move', { accountId, sectionId, targetIndex }),
     setSectionHidden: (id, hidden) => invoke('roster:section-hidden', { id, hidden }),
     setAccountHidden: (id, hidden) => invoke('roster:account-hidden', { id, hidden }),
     showAll: () => invoke('roster:show-all'),

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' https://media.valorant-api.com https://*.valorant-api.com https://raw.communitydragon.org https://cdn.jsdelivr.net data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self' https://valorant-api.com" />
+        content="default-src 'self'; img-src 'self' https://media.valorant-api.com https://*.valorant-api.com https://raw.communitydragon.org data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self' https://valorant-api.com" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Riot Relay</title>
   <link rel="icon" type="image/png" href="../build/icon.png" />
@@ -21,7 +21,7 @@
     <div class="titlebar__brand">
       <img class="logo" src="../build/icon.png" alt="" />
       <span class="titlebar__name">Riot Relay</span>
-      <span class="titlebar__ver" id="app-version-title">1.3.6</span>
+      <span class="titlebar__ver" id="app-version-title">1.3.7</span>
     </div>
 
     <div class="titlebar__spacer"></div>
@@ -443,7 +443,7 @@
             <section class="update-card" aria-live="polite">
               <div class="update-card__head">
                 <span>UPDATE STATUS</span>
-                <b id="update-current-version">Riot Relay 1.3.6</b>
+                <b id="update-current-version">Riot Relay 1.3.7</b>
               </div>
               <strong id="update-status">Preparing update service…</strong>
               <p id="update-detail">Automatic updates are initialized by the desktop process.</p>
@@ -490,8 +490,31 @@
     <span class="titlebar__spacer"></span>
     <span class="status status--deceive" id="status-deceive">Deceive: disabled</span>
     <span class="status status--catalog" id="status-catalog">Catalog: —</span>
-    <span class="status status--version" id="app-version-status">Riot Relay 1.3.6</span>
+    <span class="status status--version" id="app-version-status">Riot Relay 1.3.7</span>
   </footer>
+
+  <!-- Roster section modal -->
+  <div class="modal" id="section-modal" role="dialog" aria-modal="true" aria-labelledby="section-modal-title" hidden>
+    <div class="modal__backdrop" data-section-close></div>
+    <form class="modal__box" id="section-form">
+      <div class="modal__head">
+        <h3 id="section-modal-title">Create section</h3>
+        <button class="iconbtn" type="button" data-section-close aria-label="Close section dialog"><span data-icon="x" data-size="15"></span></button>
+      </div>
+      <div class="modal__body">
+        <input type="hidden" id="section-modal-id" />
+        <div class="field" id="section-name-field">
+          <label for="section-modal-name">Section name</label>
+          <input id="section-modal-name" type="text" required maxlength="64" autocomplete="off" />
+        </div>
+        <p class="section-delete-warning" id="section-delete-warning" hidden><strong>This section will be deleted.</strong> Its accounts will be kept and moved to No section.</p>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" data-section-close>Cancel</button>
+        <button class="btn btn--primary" type="submit" id="section-modal-submit">Create section</button>
+      </div>
+    </form>
+  </div>
 
   <!-- Account modal -->
   <div class="modal" id="account-modal" hidden>
