@@ -23,6 +23,7 @@ const RIOT_PROCESSES = [
   'RiotClientServices', 'RiotClientUx', 'RiotClientUxRender', 'RiotClientCrashHandler',
   'VALORANT', 'VALORANT-Win64-Shipping',
   'LeagueClient', 'LeagueClientUx', 'LeagueClientUxRender', 'League of Legends',
+  'LoR', 'LegendsOfRuneterra',
 ];
 
 const DEFAULT_CLIENT_PATHS = [
@@ -34,10 +35,22 @@ const DEFAULT_CLIENT_PATHS = [
 // All Riot titles launch through RiotClientServices with a product/patchline.
 // Deceive accepts lol | lor | valorant (TFT rides the League client).
 const GAMES = {
-  valorant: { label: 'VALORANT', product: 'valorant', patchline: 'live', deceive: 'valorant' },
-  lol: { label: 'League of Legends', product: 'league_of_legends', patchline: 'live', deceive: 'lol' },
-  tft: { label: 'Teamfight Tactics', product: 'league_of_legends', patchline: 'live', deceive: 'lol' },
-  lor: { label: 'Legends of Runeterra', product: 'bacon', patchline: 'live', deceive: 'lor' },
+  valorant: {
+    label: 'VALORANT', product: 'valorant', patchline: 'live', deceive: 'valorant',
+    processes: ['VALORANT', 'VALORANT-Win64-Shipping'],
+  },
+  lol: {
+    label: 'League of Legends', product: 'league_of_legends', patchline: 'live', deceive: 'lol',
+    processes: ['LeagueClient', 'LeagueClientUx', 'League of Legends'],
+  },
+  tft: {
+    label: 'Teamfight Tactics', product: 'league_of_legends', patchline: 'live', deceive: 'lol',
+    processes: ['LeagueClient', 'LeagueClientUx', 'League of Legends'],
+  },
+  lor: {
+    label: 'Legends of Runeterra', product: 'bacon', patchline: 'live', deceive: 'lor',
+    processes: ['LoR', 'LegendsOfRuneterra'],
+  },
 };
 
 function findRiotClient(configuredPath) {
@@ -64,12 +77,22 @@ function clearRiotSession() {
   return removed;
 }
 
-function ps(script, stdin = null, onLine = null) {
+function ps(script, stdin = null, onLine = null, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script], {
       windowsHide: true,
     });
-    let out = '', err = '', pending = '';
+    let out = '', err = '', pending = '', settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* already stopped */ }
+      finish(reject, new Error('Native Windows helper timed out.'));
+    }, Math.max(1000, timeoutMs));
     child.stdout.on('data', (data) => {
       const text = String(data);
       out += text;
@@ -82,14 +105,14 @@ function ps(script, stdin = null, onLine = null) {
       }
     });
     child.stderr.on('data', (d) => (err += d));
-    child.on('error', reject);
+    child.on('error', (error) => finish(reject, new Error(safeError(error, 'Native Windows helper failed.'))));
     child.on('close', (code) => {
       if (onLine && pending.trim()) {
         try { onLine(pending.trim()); } catch { /* diagnostics only */ }
       }
-      if (code === 0) return resolve(out.trim());
-      const reason = (err.trim().split(/\r?\n/)[0] || `PowerShell exited ${code}`).slice(0, 160);
-      reject(new Error(reason));
+      if (code === 0) return finish(resolve, out.trim());
+      const rawReason = err.trim().split(/\r?\n/)[0] || `PowerShell exited ${code}`;
+      finish(reject, new Error(safeError(rawReason, 'Native login helper failed.')));
     });
     if (stdin !== null) child.stdin.write(stdin);
     child.stdin.end();
@@ -98,6 +121,30 @@ function ps(script, stdin = null, onLine = null) {
 
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function safeError(error, fallback = 'Operation failed.') {
+  let message = String(error && error.message ? error.message : error || fallback);
+  message = message
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(authorization|access[_-]?token|refresh[_-]?token|token|password|secret)\b["']?\s*[:=]\s*["']?[^"'\s,;}]+/gi, '$1=[redacted]')
+    .replace(/\b[A-Za-z]:[\\/][^\r\n"'<>]*/g, '[redacted-path]')
+    .replace(/\\\\[^\\\s]+\\[^\r\n"'<>]*/g, '[redacted-path]')
+    .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, '[redacted-id]')
+    .replace(/\b(puuid|uuid|accountId|processId|pid)\b["']?\s*[:=]\s*["']?[^"'\s,;}]+/gi, '$1=[redacted-id]')
+    .replace(/\b(?=[A-Za-z0-9_-]{24,}\b)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/g, '[redacted-id]')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return message.slice(0, 180);
+}
+
+function safeProgressLabel(label) {
+  return safeError(label, 'Switch in progress.')
+    .replace(/\b(?:pid|processId|class|windowClass|size)\s*=\s*[^\s,;]+/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, 180) || 'Switch in progress.';
 }
 
 async function killRiotProcesses() {
@@ -116,9 +163,11 @@ async function killRiotProcesses() {
       if (-not $alive) { break }
       Start-Sleep -Milliseconds 200
     }
+    if ($alive) { exit 23 }
     'ok'
   `;
-  await ps(script);
+  try { await ps(script); }
+  catch { throw new Error('Riot or game processes were still running, so the switch was stopped before changing session or configuration.'); }
 }
 
 /**
@@ -138,8 +187,83 @@ function launchClient(clientPath, { game = null, configUrl = '' } = {}) {
   const selected = game && GAMES[game];
   if (selected) args.push(`--launch-product=${selected.product}`, `--launch-patchline=${selected.patchline}`);
   if (configUrl) args.unshift(`--client-config-url=${configUrl}`);
-  const child = spawn(clientPath, args, { detached: true, stdio: 'ignore' });
-  child.unref();
+  return new Promise((resolve, reject) => {
+    let child;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    try {
+      child = spawn(clientPath, args, { detached: true, stdio: 'ignore' });
+    } catch (error) {
+      reject(new Error(safeError(error, 'Riot Client launch request failed.')));
+      return;
+    }
+    child.once('error', (error) => finish(reject, new Error(safeError(error, 'Riot Client launch request failed.'))));
+    child.once('spawn', () => {
+      child.unref();
+      finish(resolve, { launcherAccepted: true, productRequested: Boolean(selected) });
+    });
+  });
+}
+
+async function waitForProductStart(game, { timeoutMs = 45000, sinceEpochMs = 0 } = {}) {
+  const selected = game && GAMES[game];
+  if (!selected || !Array.isArray(selected.processes) || !selected.processes.length) {
+    return { launchVerified: false, game };
+  }
+  const boundedTimeoutMs = Math.min(60000, Math.max(2000, Number(timeoutMs) || 45000));
+  const names = selected.processes.map((name) => `'${name.replace(/'/g, "''")}'`).join(',');
+  const iterations = Math.max(1, Math.ceil(boundedTimeoutMs / 1000));
+  // Only count a process that actually STARTED after our launch mark. A stale
+  // VALORANT/League process (or a lingering crash/Vanguard-adjacent process)
+  // must never be mistaken for a fresh launch — that produced false positives.
+  const since = Math.max(0, Number(sinceEpochMs) || 0);
+  const script = `
+    $names = @(${names})
+    $since = [DateTimeOffset]::FromUnixTimeMilliseconds(${since}).LocalDateTime
+    for ($i = 0; $i -lt ${iterations}; $i++) {
+      foreach ($name in $names) {
+        $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+        foreach ($p in $procs) {
+          try { if ($p.StartTime -ge $since) { 'ready'; exit 0 } } catch { }
+        }
+      }
+      Start-Sleep -Milliseconds 1000
+    }
+    exit 24
+  `;
+  try {
+    const result = await ps(script, null, null, boundedTimeoutMs + 5000);
+    if (result.trim() === 'ready') return { launchVerified: true, game };
+  } catch { /* Best-effort detection only; see launchProduct. */ }
+  // Not observing a freshly started game process is NOT a hard failure:
+  // RiotClientServices with --launch-product opens the client on that game, but
+  // the game process itself may only appear after patching or once the user
+  // presses PLAY. Upstream Deceive never verifies the game process at all.
+  return { launchVerified: false, game };
+}
+
+async function launchProduct(clientPath, { game, configUrl = '' } = {}) {
+  const selected = game && GAMES[game];
+  if (!selected) throw new Error('The requested Riot product is not supported.');
+  // Launch exactly once, like upstream Deceive. Re-spawning RiotClientServices
+  // while the previous instance is still initializing makes the second call
+  // merely signal the first (which may be ignored), so we do not double-launch.
+  const launchMark = Date.now();
+  await launchClient(clientPath, { game, configUrl });
+  const detection = await waitForProductStart(game, { timeoutMs: 25000, sinceEpochMs: launchMark });
+  // launcherAccepted: RiotClientServices accepted the request (the game is
+  // launching/patching or waiting on PLAY). launchVerified: a freshly started
+  // game process was actually observed. The switch succeeds on acceptance.
+  return {
+    launchRequested: true,
+    launcherAccepted: true,
+    launchVerified: detection.launchVerified === true,
+    game,
+  };
 }
 
 /**
@@ -390,8 +514,12 @@ async function switchAccount({
   game = null,
   instant = false,
   onBeforeLaunch = null,
+  onBeforeGameLaunch = null,
+  onAfterGameLaunch = null,
   verifyAccount = null,
 }, onStep = () => {}) {
+  const progressSink = typeof onStep === 'function' ? onStep : () => {};
+  onStep = (label) => progressSink(safeProgressLabel(label));
   const client = findRiotClient(clientPath);
   if (!client) throw new Error('Riot Client not found. Open Settings › Riot Client and set the path to RiotClientServices.exe.');
   if (loginMode === 'native-required' && !instant && !String(username || '').trim()) {
@@ -404,10 +532,51 @@ async function switchAccount({
     throw new Error('AUTO_LOGIN_DISABLED: Enable “Auto-fill credentials on switch” in Settings before switching.');
   }
   const targetLabel = game && GAMES[game] ? GAMES[game].label : 'Riot Client';
+  const stageProductLaunch = !!(game && typeof onBeforeGameLaunch === 'function');
+  let configMigration = null;
+  let launchedGame = null;
+  let launchRequested = false;
+  let launcherAccepted = false;
+  let launchVerified = false;
+  const launchVerifiedProduct = async () => {
+    if (!game) return;
+    try {
+      if (stageProductLaunch) {
+        onStep(`Preparing verified configuration before launching ${targetLabel}…`);
+        configMigration = await onBeforeGameLaunch(onStep);
+      }
+      onStep(configUrl ? `Requesting ${targetLabel} launch (appearing offline)…` : `Requesting ${targetLabel} launch…`);
+      launchRequested = true;
+      const productLaunch = await launchProduct(client, { game, configUrl });
+      launcherAccepted = productLaunch.launcherAccepted === true;
+      launchVerified = productLaunch.launchVerified === true;
+      onStep(launchVerified
+        ? `${targetLabel} is starting.`
+        : `Riot Client accepted the ${targetLabel} launch request. If it does not open, press PLAY in the Riot Client.`);
+      if (typeof onAfterGameLaunch === 'function') {
+        const postLaunch = await onAfterGameLaunch(configMigration, onStep);
+        if (postLaunch && typeof postLaunch === 'object') configMigration = { ...(configMigration || {}), ...postLaunch };
+      }
+      launchedGame = launchVerified ? game : null;
+    } catch (error) {
+      error.code = 'PRE_GAME_LAUNCH_FAILED';
+      throw error;
+    }
+  };
   const verify = async (phase = 'restore') => {
     if (typeof verifyAccount !== 'function') return { status: 'timeout' };
-    try { return await verifyAccount({ phase }); }
-    catch (error) { return { status: 'timeout', reason: String(error && error.message ? error.message : error) }; }
+    try {
+      const verification = await verifyAccount({ phase });
+      if (!verification || typeof verification !== 'object') return { status: 'timeout' };
+      return {
+        ...verification,
+        reason: verification.reason
+          ? safeError(verification.reason, 'Riot identity verification did not complete.')
+          : undefined,
+      };
+    } catch (error) {
+      return { status: 'timeout', reason: safeError(error, 'Riot identity verification did not complete.') };
+    }
   };
 
   onStep('Closing the current Riot session…');
@@ -422,8 +591,13 @@ async function switchAccount({
     throw new Error('AUTO_LOGIN_DISABLED: The saved session could not be restored and automatic login is disabled in Settings.');
   }
 
-  onStep(configUrl ? `Launching ${targetLabel} (appearing offline)…` : `Launching ${targetLabel}…`);
-  launchClient(client, { game, configUrl });
+  const initialTarget = stageProductLaunch ? 'Riot Client for identity verification' : targetLabel;
+  onStep(configUrl ? `Launching ${initialTarget} (appearing offline)…` : `Launching ${initialTarget}…`);
+  const initialLaunch = await launchClient(client, { game: stageProductLaunch ? null : game, configUrl });
+  if (!stageProductLaunch && game) {
+    launchRequested = initialLaunch.productRequested === true;
+    launcherAccepted = initialLaunch.launcherAccepted === true;
+  }
 
   let fallback = false;
   let restoredVerification = null;
@@ -431,8 +605,12 @@ async function switchAccount({
     onStep('Verifying the restored Riot session…');
     restoredVerification = await verify();
     if (restoredVerification.status === 'matched') {
+      await launchVerifiedProduct();
       onStep('Saved session verified — requested account is active.');
-      return { instant: true, fallback: false, verified: true, verification: restoredVerification };
+      return {
+        instant: true, fallback: false, verified: true, verification: restoredVerification,
+        launchedGame, launchRequested, launcherAccepted, launchVerified, configMigration,
+      };
     }
     if (restoredVerification.status === 'timeout') {
       onStep('Riot is still starting; leaving it open without restarting.');
@@ -465,7 +643,7 @@ async function switchAccount({
       await killRiotProcesses();
       await delay(1200);
       clearRiotSession();
-      launchClient(client, { game, configUrl });
+      await launchClient(client, { game: stageProductLaunch ? null : game, configUrl });
     } else {
       // Expired snapshots already leave a usable login form open. Reuse it;
       // killing/relaunching here caused the visible open/close/open loop.
@@ -494,26 +672,41 @@ async function switchAccount({
   onStep('Waiting for and targeting the Riot login form…');
   try {
     const input = await autoLogin(username, password, (event) => {
-      const extra = event.checkpoint === 'WINDOW_SELECTED'
-        ? ` pid=${event.processId} class=${event.windowClass} size=${event.width}x${event.height}`
-        : '';
-      onStep(`Native input: ${event.checkpoint}${extra}`);
+      const labels = {
+        HELPER_STARTED: 'Secure login helper started.',
+        WINDOW_SELECTED: 'Riot login window is ready.',
+        FORM_SETTLE_WAIT_COMPLETE: 'Riot login form finished loading.',
+        FOREGROUND_ACQUIRED: 'Riot login form is active.',
+        USERNAME_INPUT_INJECTED: 'Username entered securely.',
+        PASSWORD_INPUT_INJECTED: 'Password entered securely.',
+        STAY_SIGNED_IN_CLICKED: 'Stay signed in selected.',
+        SUBMIT_CLICKED: 'Riot sign-in submitted.',
+      };
+      if (labels[event.checkpoint]) onStep(labels[event.checkpoint]);
     });
     onStep('Credentials submitted. Complete Riot 2FA or any verification challenge in the Riot Client if prompted…');
     const verificationAvailable = typeof verifyAccount === 'function';
     const verification = verificationAvailable ? await verify('post-login') : { status: 'timeout' };
     const verified = verification.status === 'matched';
+    const authenticationNotConfirmed = !verified && verification.status === 'authentication-not-confirmed';
+    if (verified) await launchVerifiedProduct();
     onStep(verified
       ? 'Requested account verified.'
       : (verification.status === 'mismatched'
         ? 'Riot signed into a different identity; the switch was rejected.'
-        : 'Input was delivered, but Riot has not confirmed the requested account yet.'));
+        : authenticationNotConfirmed
+          ? 'Riot did not authenticate; saved credentials or a verification challenge need attention.'
+          : 'Input was delivered, but Riot has not confirmed the requested account yet.'));
     return {
       instant: false,
       fallback,
       verified,
       recoverable: !verified && verification.status !== 'mismatched',
-      awaitingUserVerification: !verified && (verification.status === 'unauthenticated' || verification.status === 'timeout'),
+      awaitingUserVerification: !verified && (verification.status === 'unauthenticated'
+        || verification.status === 'authentication-not-confirmed' || verification.status === 'timeout'),
+      authenticationNotConfirmed,
+      credentialAttention: authenticationNotConfirmed,
+      reason: authenticationNotConfirmed ? verification.reason : undefined,
       verification,
       verificationAvailable,
       automationAttempted: true,
@@ -523,16 +716,16 @@ async function switchAccount({
       submittedAt: Number(input.submittedAt || Date.now()),
       manualRequired: false,
       inputCode: input.code,
-      inputWindow: {
-        processId: input.processId,
-        windowClass: input.windowClass,
-        width: input.width,
-        height: input.height,
-      },
+      launchedGame,
+      launchRequested,
+      launcherAccepted,
+      launchVerified,
+      configMigration,
     };
   } catch (e) {
-    const reason = String(e && e.message ? e.message : e).slice(0, 180);
-    onStep(`Automatic form input failed (${reason}).`);
+    if (e && e.code === 'PRE_GAME_LAUNCH_FAILED') throw e;
+    const reason = safeError(e, 'Automatic form input failed.');
+    onStep('Automatic form input failed. Complete sign-in manually in Riot Client.');
     return {
       instant: false,
       fallback,
@@ -549,4 +742,7 @@ async function switchAccount({
   }
 }
 
-module.exports = { switchAccount, launchClient, killRiotProcesses, findRiotClient, clearRiotSession, GAMES };
+module.exports = {
+  switchAccount, launchClient, launchProduct, waitForProductStart,
+  killRiotProcesses, findRiotClient, clearRiotSession, GAMES,
+};

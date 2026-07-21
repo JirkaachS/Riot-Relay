@@ -24,14 +24,18 @@ const packageMetadata = require('../package.json');
 
 const { Vault } = require('./vault');
 const webauthn = require('./webauthn');
-const { RiotClient, RANK_TIERS } = require('./riot');
+const { RiotClient, RANK_TIERS, VALORANT_MAPS, VALORANT_QUEUES } = require('./riot');
 const { Catalog, vtlProfileUrl, trackerProfileUrl } = require('./valorant');
 const league = require('./league');
-const { switchAccount, launchClient, findRiotClient, clearRiotSession, GAMES } = require('./switcher');
+const {
+  switchAccount, launchProduct, killRiotProcesses, findRiotClient, clearRiotSession, GAMES,
+} = require('./switcher');
 const { DeceiveProxy } = require('./deceive');
 const session = require('./session');
 const { assertAccountIdentity, findRosterMatches } = require('./account-identity');
 const { UpdateService } = require('./updater');
+const { DiscordPresenceService } = require('./discord-presence');
+const { ConfigProfiles, canonicalGame } = require('./config-profiles');
 
 const APP_NAME = 'Riot Relay';
 const LEGACY_APP_NAMES = ['Riot Account Manager', 'Arcshift', 'Vanguard'];
@@ -87,6 +91,8 @@ const openDevTools = process.argv.includes('--devtools');
 let mainWindow = null;
 let tray = null;
 let trayNotification = null;
+let trayNotificationWatchdog = null;
+let lastTrayNotificationAt = 0;
 let rendererServer = null;
 let rendererOrigin = '';
 let isQuitting = false;
@@ -95,6 +101,14 @@ let riot = null;
 let catalog = null;
 let deceiveProxy = null;
 let updateService = null;
+let discordPresence = null;
+let configProfiles = null;
+let discordContext = null;
+let discordVerifiedPuuid = null;
+let discordRankByGame = {};
+let discordLiveTimer = null;
+let discordLiveGeneration = 0;
+let discordLiveInFlight = false;
 const chatHandleSecret = crypto.randomBytes(32);
 const chatHandles = new Map();
 const chatLabels = new Map();
@@ -120,6 +134,22 @@ const DEFAULT_SETTINGS = {
   deceiveActivityMode: 'hide', // preserve | hide | generic
   deceiveCustomStatus: '',
   deceiveLeagueHelper: true,
+  discordPresenceEnabled: false,
+  discordClientId: '',
+  discordShowGame: true,
+  discordShowRank: false,
+  discordShowRiotId: false,
+  discordShowStatus: false,
+  discordShowElapsed: true,
+  discordShowLiveMatch: false,
+  discordShowMatchMode: false,
+  discordShowMatchMap: false,
+  discordShowMatchPhase: false,
+  discordShowMatchScore: false,
+  discordShowMatchElapsed: false,
+  discordCustomDetails: '',
+  discordCustomState: '',
+  discordLargeImage: '',
   hideLoginNames: false,
   hideDisplayNames: false,
   featureTutorialVersion: 0,
@@ -148,8 +178,77 @@ function loadSettings() {
 
 function saveSettings(patch) {
   const next = { ...loadSettings(), ...knownSettings(patch) };
-  fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2));
+  const target = settingsPath();
+  const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(temp, JSON.stringify(next, null, 2), { flag: 'wx' });
+  const backup = `${target}.bak-${process.pid}-${Date.now()}`;
+  try {
+    if (fs.existsSync(target)) fs.renameSync(target, backup);
+    fs.renameSync(temp, target);
+    fs.rmSync(backup, { force: true });
+  } catch (error) {
+    try { fs.rmSync(temp, { force: true }); } catch { /* ignore */ }
+    try { if (fs.existsSync(backup) && !fs.existsSync(target)) fs.renameSync(backup, target); } catch { /* preserve original error */ }
+    throw error;
+  }
   return next;
+}
+
+const STARTUP_UNAVAILABLE_REASON = 'Available in installed Windows builds.';
+
+function startupSupported() {
+  return process.platform === 'win32' && app.isPackaged;
+}
+
+function startupLoginItemOptions() {
+  return { path: process.execPath, args: [] };
+}
+
+function getStartupState() {
+  if (!startupSupported()) {
+    return { supported: false, enabled: false, reason: STARTUP_UNAVAILABLE_REASON };
+  }
+  const registration = app.getLoginItemSettings(startupLoginItemOptions());
+  return { supported: true, enabled: registration.openAtLogin === true, reason: '' };
+}
+
+function setStartupEnabled(enabled) {
+  if (!startupSupported()) return getStartupState();
+  const requested = enabled === true;
+  const options = startupLoginItemOptions();
+  app.setLoginItemSettings({ ...options, openAtLogin: requested });
+  const actual = getStartupState();
+  if (actual.enabled !== requested) {
+    throw new Error(`Windows did not ${requested ? 'enable' : 'disable'} startup registration.`);
+  }
+  return actual;
+}
+
+function discordOptions(settings = loadSettings()) {
+  return {
+    enabled: settings.discordPresenceEnabled === true,
+    clientId: settings.discordClientId,
+    showGame: settings.discordShowGame !== false,
+    showRank: settings.discordShowRank === true,
+    showRiotId: settings.discordShowRiotId === true,
+    showStatus: settings.discordShowStatus === true,
+    showElapsed: settings.discordShowElapsed !== false,
+    showLiveMatch: settings.discordShowLiveMatch === true,
+    showMatchMode: settings.discordShowMatchMode === true,
+    showMatchMap: settings.discordShowMatchMap === true,
+    showMatchPhase: settings.discordShowMatchPhase === true,
+    showMatchScore: settings.discordShowMatchScore === true,
+    showMatchElapsed: settings.discordShowMatchElapsed === true,
+    customDetails: settings.discordCustomDetails,
+    customState: settings.discordCustomState,
+    largeImage: settings.discordLargeImage,
+    hideDisplayNames: settings.hideDisplayNames === true,
+  };
+}
+
+function configureDiscord(settings = loadSettings()) {
+  return discordPresence ? discordPresence.configure(discordOptions(settings)) : null;
 }
 
 const CONTENT_TYPES = {
@@ -223,12 +322,21 @@ function reconcileTray() {
 
 function showTrayHiddenNotification() {
   if (!tray || process.platform !== 'win32') return;
+  const now = Date.now();
+  if (now - lastTrayNotificationAt < 2000) return;
+  lastTrayNotificationAt = now;
+
   const title = 'Riot Relay is still running';
   const body = 'The window was hidden to the notification area. Click this notification or the Riot Relay tray icon to restore it.';
-  let usedFallback = false;
+  let settled = false;
+  const clearWatchdog = () => {
+    if (trayNotificationWatchdog) clearTimeout(trayNotificationWatchdog);
+    trayNotificationWatchdog = null;
+  };
   const showBalloonFallback = () => {
-    if (usedFallback || !tray) return;
-    usedFallback = true;
+    if (settled || !tray) return;
+    settled = true;
+    clearWatchdog();
     try {
       tray.displayBalloon({ title, content: body, iconType: 'info', noSound: true, respectQuietTime: false });
     } catch { /* Windows may disable both app notifications and tray balloons */ }
@@ -239,6 +347,7 @@ function showTrayHiddenNotification() {
     return;
   }
   try {
+    clearWatchdog();
     if (trayNotification) trayNotification.close();
     const notification = new Notification({
       id: 'riot-relay-tray-hidden',
@@ -250,29 +359,38 @@ function showTrayHiddenNotification() {
       icon: path.join(__dirname, '..', 'build', 'icon.ico'),
     });
     trayNotification = notification;
+    notification.once('show', () => {
+      settled = true;
+      clearWatchdog();
+    });
     notification.once('click', () => focusMainWindow());
     notification.once('failed', showBalloonFallback);
     notification.once('close', () => {
       if (trayNotification === notification) trayNotification = null;
     });
     notification.show();
+    // Some Windows notification configurations suppress the toast without a
+    // failure event. Fall back only when Electron never acknowledges "show".
+    trayNotificationWatchdog = setTimeout(showBalloonFallback, 1400);
+    if (trayNotificationWatchdog.unref) trayNotificationWatchdog.unref();
   } catch {
     trayNotification = null;
     showBalloonFallback();
   }
 }
 
-function hideMainWindowToTray() {
+function hideMainWindowToTray({ notify = 'if-visible' } = {}) {
   if (!mainWindow) return;
   const wasVisible = mainWindow.isVisible();
   reconcileTray();
   mainWindow.hide();
-  if (wasVisible && !mainWindow.isVisible()) showTrayHiddenNotification();
+  const hidden = !mainWindow.isVisible();
+  if (hidden && (notify === true || (notify === 'if-visible' && wasVisible))) showTrayHiddenNotification();
 }
 
 function minimizeMainWindow() {
   if (!mainWindow) return;
-  if (trayEnabled()) hideMainWindowToTray();
+  if (trayEnabled()) hideMainWindowToTray({ notify: true });
   else mainWindow.minimize();
 }
 
@@ -322,7 +440,9 @@ function createWindow() {
   mainWindow.on('minimize', (event) => {
     if (!isQuitting && trayEnabled()) {
       event.preventDefault();
-      hideMainWindowToTray();
+      // Native taskbar minimize can flip isVisible() before this event reaches
+      // Electron, so explicitly request the tray notice instead of inferring it.
+      hideMainWindowToTray({ notify: true });
     }
   });
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:state', { maximized: true }));
@@ -330,16 +450,63 @@ function createWindow() {
   mainWindow.on('closed', () => (mainWindow = null));
 }
 
+// Only one Riot Relay may run at a time. Closing the window minimizes to the
+// tray (the process keeps running), so a second launch must surface the
+// existing instance instead of starting a duplicate that fights over the tray,
+// the renderer server, and the Deceive proxy/ports.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
+
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (gotSingleInstanceLock) createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  focusMainWindow();
+});
+
 app.whenReady().then(async () => {
+  if (!gotSingleInstanceLock) return;
   app.setAppUserModelId('com.riotrelay.desktop');
   const dir = app.getPath('userData');
   vault = new Vault(dir, safeStorage);
   riot = new RiotClient();
   catalog = new Catalog(dir);
+  configProfiles = new ConfigProfiles(dir);
+  discordPresence = new DiscordPresenceService({
+    onState: (discordState) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('discord:state', discordState);
+    },
+  });
+  configureDiscord();
 
   await startRendererServer();
   createWindow();
   reconcileTray();
+
+  // If a game is still running from before Riot Relay was closed, its chat was
+  // routed through our (now gone) Deceive proxy and is stuck reconnecting to a
+  // dead local port. Rebind the same port + known route so the session heals
+  // instead of staying broken.
+  try {
+    const settings = loadSettings();
+    const persisted = DeceiveProxy.readPersistedSession(dir);
+    if (settings.useDeceive === true && persisted && riot.isRunning()) {
+      deceiveProxy = new DeceiveProxy(dir, {
+        launchProduct: persisted.launchProduct,
+        preserveParty: settings.deceivePreserveParty !== false,
+        activityMode: settings.deceiveActivityMode || 'hide',
+        customStatus: settings.deceiveCustomStatus || '',
+        leagueHelper: settings.deceiveLeagueHelper !== false,
+      });
+      await deceiveProxy.start(settings.deceiveStatus || 'offline', {
+        restorePort: persisted.chatProxyPort,
+        restoreRoute: persisted.route,
+      });
+    }
+  } catch { /* best effort; never block startup */ }
+
   updateService = new UpdateService({
     app,
     installerFlavor: packageMetadata.installerFlavor,
@@ -357,7 +524,12 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  stopDiscordLivePolling(false);
   if (updateService) updateService.dispose();
+  if (discordPresence) discordPresence.dispose();
+  discordPresence = null;
+  if (trayNotificationWatchdog) clearTimeout(trayNotificationWatchdog);
+  trayNotificationWatchdog = null;
   if (trayNotification) trayNotification.close();
   trayNotification = null;
   if (tray) tray.destroy();
@@ -374,7 +546,7 @@ app.on('window-all-closed', () => {
 // ---- IPC helpers -----------------------------------------------------------
 
 function ok(data) { return { ok: true, data }; }
-function fail(err) { return { ok: false, error: err instanceof Error ? err.message : String(err) }; }
+function fail(err) { return { ok: false, error: safeError(err, 'Operation failed.') }; }
 
 function handle(channel, fn) {
   ipcMain.handle(channel, async (_evt, ...args) => {
@@ -383,13 +555,35 @@ function handle(channel, fn) {
   });
 }
 
+const CONFIG_ACTIVITY_OPERATIONS = Object.freeze({
+  'configs:capture-cloud': 'capture',
+  'configs:apply-cloud': 'apply',
+  'configs:restore-cloud': 'restore',
+});
+
+function emitConfigActivity(channel, stage, outcome = 'info', detail = '') {
+  const operation = CONFIG_ACTIVITY_OPERATIONS[channel];
+  if (!operation) return;
+  const record = { time: new Date().toISOString(), operation, stage, outcome };
+  if (detail) record.detail = safeError(detail, 'Operation failed.');
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'config-operations.log'), `${JSON.stringify(record)}\n`); }
+  catch { /* diagnostics must never break configuration operations */ }
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('configs:activity', record);
+}
+
 function handleTrusted(channel, fn) {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
       const senderOrigin = new URL(event.senderFrame && event.senderFrame.url || '').origin;
       if (!rendererOrigin || senderOrigin !== rendererOrigin) throw new Error('Untrusted renderer request.');
-      return ok(await fn(...args));
-    } catch (err) { return fail(err); }
+      emitConfigActivity(channel, 'started');
+      const result = await fn(...args);
+      emitConfigActivity(channel, 'completed', 'good');
+      return ok(result);
+    } catch (err) {
+      emitConfigActivity(channel, 'failed', 'bad', err);
+      return fail(err);
+    }
   });
 }
 
@@ -410,20 +604,73 @@ function focusMainWindow() {
   mainWindow.focus();
 }
 
+const LEGACY_PROVIDER_IDENTITY_ERROR = /(?:platform probes?.*PUUID.*(?:missing|match)|PUUID was missing|duplicate exact Riot ID rows without a matching provider PUUID|OP\.GG(?: TFT)? returned a PUUID that did not match)/i;
+
+function displaySafeStats(stats) {
+  if (!stats || typeof stats !== 'object' || Array.isArray(stats)) return stats;
+  const result = { ...stats };
+  for (const game of ['valorant', 'league', 'tft']) {
+    const section = stats[game];
+    if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
+    const next = { ...section };
+    let legacy = false;
+    for (const key of ['error', 'providerError']) {
+      if (!next[key]) continue;
+      if (game !== 'valorant' && LEGACY_PROVIDER_IDENTITY_ERROR.test(String(next[key]))) {
+        next[key] = 'Provider identity rules changed; sync this account to refresh its verified platform data.';
+        legacy = true;
+      } else next[key] = safeError(next[key], `${game} data is unavailable.`);
+    }
+    if (legacy) next.refreshNeeded = true;
+    result[game] = next;
+  }
+  return result;
+}
+
 /** Tag accounts only when a manifest-backed, identity-bound snapshot is valid. */
 function annotate(accounts) {
   const userData = app.getPath('userData');
   return (accounts || []).map((account) => {
     const { manifest, ...sessionStatus } = session.validateSession(userData, account.id, account);
-    return { ...account, session: sessionStatus, hasSession: sessionStatus.available && sessionStatus.identityVerified };
+    return {
+      ...account,
+      stats: displaySafeStats(account.stats),
+      session: sessionStatus,
+      hasSession: sessionStatus.available && sessionStatus.identityVerified,
+    };
   });
 }
 
 function wait(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function sameIdentity(a, b) { return !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase(); }
+function exactPuuidMatch(observed, expected) {
+  const actual = String(observed || '').trim();
+  const target = String(expected || '').trim();
+  return !!actual && !!target && actual === target;
+}
 function safeError(error, fallback) {
-  const message = String(error && error.message ? error.message : error || fallback);
-  return message.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').slice(0, 180);
+  let message = String(error && error.message ? error.message : error || fallback || 'Operation failed.');
+  message = message
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(authorization|access[_-]?token|refresh[_-]?token|token|password|secret)\b["']?\s*[:=]\s*["']?[^"'\s,;}]+/gi, '$1=[redacted]')
+    .replace(/\/players\/[^/?\s"'<>]+/gi, '/players/[redacted]')
+    .replace(/\b[A-Za-z]:[\\/][^\r\n"'<>]*/g, '[redacted-path]')
+    .replace(/\\\\[^\\\s]+\\[^\r\n"'<>]*/g, '[redacted-path]')
+    .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, '[redacted-id]')
+    .replace(/\b(puuid|uuid|accountId|processId|pid)\b["']?\s*[:=]\s*["']?[^"'\s,;}]+/gi, '$1=[redacted-id]')
+    .replace(/\b(?=[A-Za-z0-9_-]{24,}\b)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/g, '[redacted-id]')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return message.slice(0, 180);
+}
+
+function safeProgressLabel(label) {
+  return safeError(label, 'Switch in progress.')
+    .replace(/\b(?:pid|processId|class|windowClass|size)\s*=\s*[^\s,;]+/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, 180) || 'Switch in progress.';
 }
 
 function rawChatId(value) {
@@ -460,6 +707,11 @@ async function runChatOperation(operation) {
 async function runAccountSwitch(operation) {
   if (accountSwitchInProgress) throw new Error('Another account switch is already in progress.');
   accountSwitchInProgress = true;
+  stopDiscordLivePolling(true);
+  discordVerifiedPuuid = null;
+  discordRankByGame = {};
+  discordContext = null;
+  if (discordPresence) discordPresence.setContext(null);
   invalidateChatSession();
   if (activeChatOperations > 0) await new Promise((resolve) => chatIdleWaiters.push(resolve));
   try { return await operation(); }
@@ -495,21 +747,275 @@ function chatRows(value, keys) {
   return [];
 }
 
-function normalizeChatFriend(friend) {
+const CHAT_PRIVATE_MAX_BASE64 = 16384;
+const CHAT_PRIVATE_MAX_BYTES = 12288;
+
+function normalizedChatIdentities(value) {
+  const identities = new Set();
+  if (!value || typeof value !== 'object') return identities;
+  const add = (rawValue) => {
+    const identity = String(rawValue || '').trim().toLowerCase();
+    if (!identity || identity.length > 512 || /[\u0000-\u001f\u007f]/.test(identity)) return;
+    const bare = identity.split('/', 1)[0];
+    identities.add(bare);
+    const separator = bare.indexOf('@');
+    if (separator > 0) identities.add(bare.slice(0, separator));
+  };
+  const sources = [value, value.identity, value.player, value.user, value.account]
+    .filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry));
+  for (const source of sources) {
+    ['puuid', 'PUUID', 'subject', 'Subject', 'pid', 'PID', 'jid', 'JID'].forEach((key) => add(source[key]));
+  }
+  return identities;
+}
+
+function normalizedChatAvailability(value) {
+  const availability = String(value || '').trim().toLowerCase();
+  if (availability === 'chat' || availability === 'online' || availability === 'away'
+    || availability === 'mobile' || availability === 'dnd') return availability;
+  return 'offline';
+}
+
+function decodePrivatePresence(value) {
+  if (typeof value !== 'string') return null;
+  const encoded = value.trim();
+  if (!encoded || encoded.length > CHAT_PRIVATE_MAX_BASE64 || !/^[A-Za-z0-9+/_-]*={0,2}$/.test(encoded)) return null;
+  try {
+    const bytes = Buffer.from(encoded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    if (!bytes.length || bytes.length > CHAT_PRIVATE_MAX_BYTES) return null;
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+function knownChatProduct(presence, privateData) {
+  const values = [
+    presence && presence.product,
+    presence && presence.productName,
+    presence && presence.product_name,
+    presence && presence.platform,
+  ];
+  if (privateData && privateData.league_of_legends) values.push('league_of_legends');
+  if (privateData && privateData.lol) values.push('lol');
+  if (privateData && privateData.valorant) values.push('valorant');
+  for (const value of values) {
+    const product = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    if (product === 'league_of_legends' || product === 'league' || product === 'lol') return 'league';
+    if (product === 'valorant') return 'valorant';
+  }
+  return '';
+}
+
+function privateProductData(privateData, product) {
+  if (!privateData) return {};
+  const nested = product === 'league'
+    ? privateData.league_of_legends || privateData.lol
+    : product === 'valorant' ? privateData.valorant : null;
+  return nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : privateData;
+}
+
+const LEAGUE_PRESENCE_PHASES = {
+  outofgame: '', inqueue: 'In queue', champselect: 'Champion select', championselect: 'Champion select',
+  ingame: 'In game', spectating: 'Spectating', hostingcustomgame: 'Custom lobby',
+};
+const LEAGUE_PRESENCE_QUEUES = {
+  0: 'Custom Game', 400: 'Normal Draft', 420: 'Ranked Solo/Duo', 430: 'Normal Blind',
+  440: 'Ranked Flex', 450: 'ARAM', 490: 'Quickplay', 700: 'Clash', 830: 'Co-op vs AI',
+  840: 'Co-op vs AI', 850: 'Co-op vs AI', 900: 'URF', 1020: 'One for All',
+  1090: 'TFT Normal', 1100: 'Ranked TFT', 1130: 'TFT Hyper Roll', 1150: 'TFT Double Up',
+  1300: 'Nexus Blitz', 1400: 'Ultimate Spellbook', 1700: 'Arena', 1710: 'Arena',
+};
+const LEAGUE_PRESENCE_QUEUE_TYPES = {
+  RANKED_SOLO_5X5: 'Ranked Solo/Duo', RANKED_FLEX_SR: 'Ranked Flex', NORMAL: 'Normal',
+  NORMAL_5X5_BLIND: 'Normal Blind', NORMAL_5X5_DRAFT: 'Normal Draft', ARAM_UNRANKED_5X5: 'ARAM',
+  CHERRY: 'Arena', RANKED_TFT: 'Ranked TFT', RANKED_TFT_DOUBLE_UP: 'TFT Double Up',
+  NORMAL_TFT: 'TFT Normal', TURBO: 'TFT Hyper Roll',
+};
+const LEAGUE_PRESENCE_MODES = {
+  CLASSIC: 'Summoner’s Rift', ARAM: 'ARAM', CHERRY: 'Arena', TFT: 'Teamfight Tactics',
+  URF: 'URF', ONEFORALL: 'One for All', ULTBOOK: 'Ultimate Spellbook', NEXUSBLITZ: 'Nexus Blitz',
+};
+const LEAGUE_CHAMPIONS = {
+  1: 'Annie', 2: 'Olaf', 3: 'Galio', 4: 'Twisted Fate', 5: 'Xin Zhao', 6: 'Urgot', 7: 'LeBlanc',
+  8: 'Vladimir', 9: 'Fiddlesticks', 10: 'Kayle', 11: 'Master Yi', 12: 'Alistar', 13: 'Ryze',
+  14: 'Sion', 15: 'Sivir', 16: 'Soraka', 17: 'Teemo', 18: 'Tristana', 19: 'Warwick',
+  20: 'Nunu & Willump', 21: 'Miss Fortune', 22: 'Ashe', 23: 'Tryndamere', 24: 'Jax', 25: 'Morgana',
+  26: 'Zilean', 27: 'Singed', 28: 'Evelynn', 29: 'Twitch', 30: 'Karthus', 31: 'Cho’Gath',
+  32: 'Amumu', 33: 'Rammus', 34: 'Anivia', 35: 'Shaco', 36: 'Dr. Mundo', 37: 'Sona',
+  38: 'Kassadin', 39: 'Irelia', 40: 'Janna', 41: 'Gangplank', 42: 'Corki', 43: 'Karma',
+  44: 'Taric', 45: 'Veigar', 48: 'Trundle', 50: 'Swain', 51: 'Caitlyn', 53: 'Blitzcrank',
+  54: 'Malphite', 55: 'Katarina', 56: 'Nocturne', 57: 'Maokai', 58: 'Renekton', 59: 'Jarvan IV',
+  60: 'Elise', 61: 'Orianna', 62: 'Wukong', 63: 'Brand', 64: 'Lee Sin', 67: 'Vayne',
+  68: 'Rumble', 69: 'Cassiopeia', 72: 'Skarner', 74: 'Heimerdinger', 75: 'Nasus', 76: 'Nidalee',
+  77: 'Udyr', 78: 'Poppy', 79: 'Gragas', 80: 'Pantheon', 81: 'Ezreal', 82: 'Mordekaiser',
+  83: 'Yorick', 84: 'Akali', 85: 'Kennen', 86: 'Garen', 89: 'Leona', 90: 'Malzahar',
+  91: 'Talon', 92: 'Riven', 96: 'Kog’Maw', 98: 'Shen', 99: 'Lux', 101: 'Xerath',
+  102: 'Shyvana', 103: 'Ahri', 104: 'Graves', 105: 'Fizz', 106: 'Volibear', 107: 'Rengar',
+  110: 'Varus', 111: 'Nautilus', 112: 'Viktor', 113: 'Sejuani', 114: 'Fiora', 115: 'Ziggs',
+  117: 'Lulu', 119: 'Draven', 120: 'Hecarim', 121: 'Kha’Zix', 122: 'Darius', 126: 'Jayce',
+  127: 'Lissandra', 131: 'Diana', 133: 'Quinn', 134: 'Syndra', 136: 'Aurelion Sol', 141: 'Kayn',
+  142: 'Zoe', 143: 'Zyra', 145: 'Kai’Sa', 147: 'Seraphine', 150: 'Gnar', 154: 'Zac',
+  157: 'Yasuo', 161: 'Vel’Koz', 163: 'Taliyah', 164: 'Camille', 166: 'Akshan', 200: 'Bel’Veth',
+  201: 'Braum', 202: 'Jhin', 203: 'Kindred', 221: 'Zeri', 222: 'Jinx', 223: 'Tahm Kench',
+  233: 'Briar', 234: 'Viego', 235: 'Senna', 236: 'Lucian', 238: 'Zed', 240: 'Kled',
+  245: 'Ekko', 246: 'Qiyana', 254: 'Vi', 266: 'Aatrox', 267: 'Nami', 268: 'Azir',
+  350: 'Yuumi', 360: 'Samira', 412: 'Thresh', 420: 'Illaoi', 421: 'Rek’Sai', 427: 'Ivern',
+  429: 'Kalista', 432: 'Bard', 497: 'Rakan', 498: 'Xayah', 516: 'Ornn', 517: 'Sylas',
+  518: 'Neeko', 523: 'Aphelios', 526: 'Rell', 555: 'Pyke', 711: 'Vex', 777: 'Yone',
+  799: 'Ambessa', 800: 'Mel', 804: 'Yunara', 875: 'Sett', 876: 'Lillia', 887: 'Gwen',
+  888: 'Renata Glasc', 893: 'Aurora', 895: 'Nilah', 897: 'K’Sante', 901: 'Smolder',
+  902: 'Milio', 910: 'Hwei', 950: 'Naafiri',
+};
+
+function boundedPresenceInteger(value, max = 99999) {
+  const text = value == null ? '' : String(value).trim();
+  if (!/^\d{1,5}$/.test(text)) return null;
+  const number = Number(text);
+  return Number.isSafeInteger(number) && number >= 0 && number <= max ? number : null;
+}
+
+function leaguePresenceMode(details) {
+  const queueId = boundedPresenceInteger(details.queueId ?? details.queue_id, 9999);
+  if (queueId != null && LEAGUE_PRESENCE_QUEUES[queueId]) return LEAGUE_PRESENCE_QUEUES[queueId];
+  const queueType = String(details.gameQueueType || details.queueType || '').trim().toUpperCase();
+  if (LEAGUE_PRESENCE_QUEUE_TYPES[queueType]) return LEAGUE_PRESENCE_QUEUE_TYPES[queueType];
+  const mode = String(details.gameMode || details.game_mode || '').trim().toUpperCase();
+  return LEAGUE_PRESENCE_MODES[mode] || '';
+}
+
+function presenceValue(presence, details, aliases) {
+  const sources = [
+    details, details && details.identity, details && details.player,
+    presence, presence && presence.identity, presence && presence.player,
+  ].filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry));
+  for (const source of sources) {
+    for (const key of aliases) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined && source[key] !== null) return source[key];
+    }
+  }
+  return undefined;
+}
+
+function safePresenceDetails(presence) {
+  const availability = normalizedChatAvailability(presence && (presence.availability || presence.state));
+  const privateData = decodePrivatePresence(presence && presence.private);
+  const product = knownChatProduct(presence, privateData);
+  if (!product) return null;
+  const details = privateProductData(privateData, product);
+  if (product === 'league') {
+    const status = String(details.gameStatus || details.game_status || '').toLowerCase().replace(/[^a-z]/g, '');
+    const phase = Object.prototype.hasOwnProperty.call(LEAGUE_PRESENCE_PHASES, status)
+      ? LEAGUE_PRESENCE_PHASES[status] : '';
+    const championId = boundedPresenceInteger(presenceValue(presence, details, [
+      'championId', 'champion_id', 'championID', 'ChampionId', 'ChampionID',
+    ]), 9999);
+    const showChampion = ['champselect', 'championselect', 'ingame', 'spectating'].includes(status);
+    const showMode = status && status !== 'outofgame';
+    const rawIcon = presenceValue(presence, details, [
+      'profileIcon', 'profileIconId', 'profileIconID', 'ProfileIcon', 'ProfileIconId', 'ProfileIconID',
+      'profile_icon', 'profile_icon_id',
+    ]);
+    const iconValue = rawIcon == null ? '' : String(rawIcon).trim();
+    const iconId = /^\d{1,9}$/.test(iconValue) ? iconValue : '';
+    const platformId = league.canonicalLeaguePlatform(presenceValue(presence, details, [
+      'platformId', 'platformID', 'PlatformId', 'PlatformID', 'platform_id', 'platform',
+    ]));
+    return {
+      availability,
+      game: 'League of Legends',
+      platformId: platformId || null,
+      activity: {
+        product: 'league',
+        game: 'League',
+        phase,
+        champion: showChampion && championId != null ? LEAGUE_CHAMPIONS[championId] || '' : '',
+        mode: showMode ? leaguePresenceMode(details) : '',
+      },
+      avatarUrl: iconId ? `https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/profile-icons/${iconId}.jpg` : '',
+    };
+  }
+  const state = String(details.sessionLoopState || details.session_loop_state || '').toUpperCase();
+  const flow = String(details.provisioningFlow || details.partyOwnerProvisioningFlow || '').toLowerCase();
+  const partyState = String(details.partyState || '').toLowerCase();
+  const phase = state === 'INGAME' ? 'In game'
+    : state === 'PREGAME' ? 'Agent select'
+      : /matchmaking/.test(`${flow} ${partyState}`) ? 'In queue' : state === 'MENUS' ? 'In menus' : '';
+  const queueKey = String(details.queueId || '').trim().toLowerCase();
+  const mapPath = String(details.matchMap || details.partyOwnerMatchMap || '').replace(/\\/g, '/');
+  const mapKey = mapPath.split('/').filter(Boolean).pop()?.toLowerCase() || '';
+  const rawCard = String(presenceValue(presence, details, [
+    'playerCardId', 'playerCardID', 'PlayerCardId', 'PlayerCardID', 'player_card_id', 'playercardid',
+  ]) || '').trim();
+  const cardId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(rawCard) ? rawCard.toLowerCase() : '';
+  return {
+    availability,
+    game: 'VALORANT',
+    platformId: null,
+    activity: {
+      product: 'valorant',
+      game: 'VALORANT',
+      phase,
+      mode: phase === 'In menus' ? '' : VALORANT_QUEUES[queueKey] || '',
+      map: state === 'PREGAME' || state === 'INGAME' ? VALORANT_MAPS[mapKey] || '' : '',
+    },
+    avatarUrl: cardId ? `https://media.valorant-api.com/playercards/${cardId}/smallart.png` : '',
+  };
+}
+
+function activePresenceIndex(payload) {
+  const index = new Map();
+  const rank = { chat: 3, online: 3, away: 2, mobile: 2, dnd: 1 };
+  for (const presence of chatRows(payload, ['presences', 'data'])) {
+    const safe = safePresenceDetails(presence);
+    if (!safe) continue;
+    for (const identity of normalizedChatIdentities(presence)) {
+      const current = index.get(identity);
+      if (!current || (rank[safe.availability] || 0) > (rank[current.availability] || 0)) index.set(identity, safe);
+    }
+  }
+  return index;
+}
+
+function friendProfileLinks(riotId, platformId) {
+  if (!/^.{1,128}#[^#]{1,128}$/.test(String(riotId || '').trim())) return {};
+  try {
+    const links = {
+      tracker: trackerProfileUrl(riotId),
+      vtl: vtlProfileUrl(riotId),
+      dpm: league.dpmProfileUrl(riotId),
+    };
+    const canonicalPlatform = league.canonicalLeaguePlatform(platformId);
+    if (canonicalPlatform) Object.assign(links, league.profileLinks(riotId, canonicalPlatform));
+    return links;
+  } catch { return {}; }
+}
+
+function normalizeChatFriend(friend, presenceIndex = new Map()) {
   const raw = rawChatId(friend);
   const id = chatHandle(raw);
   if (!id) return null;
   const gameName = String(friend.game_name || friend.gameName || friend.name || friend.displayName || 'Unknown friend').slice(0, 80);
   const tagLine = String(friend.game_tag || friend.gameTag || friend.tag_line || friend.tagLine || '').slice(0, 20);
   const label = tagLine ? `${gameName}#${tagLine}` : gameName;
+  const identities = normalizedChatIdentities(friend);
+  for (const identity of identities) chatLabels.set(identity, label);
   chatLabels.set(raw.toLowerCase(), label);
+  let presence = null;
+  for (const identity of identities) {
+    if (presenceIndex.has(identity)) { presence = presenceIndex.get(identity); break; }
+  }
+  const rosterProduct = knownChatProduct(friend, null);
+  const platformId = presence && league.canonicalLeaguePlatform(presence.platformId);
   return {
     id,
     displayName: gameName,
     riotId: label,
-    availability: String(friend.availability || friend.state || 'offline').slice(0, 24),
-    game: String(friend.product || friend.platform || friend.game || '').slice(0, 32),
+    availability: presence ? presence.availability : normalizedChatAvailability(friend.availability || friend.state),
+    game: presence ? presence.game : (rosterProduct === 'league' ? 'League of Legends' : rosterProduct === 'valorant' ? 'VALORANT' : ''),
+    activity: presence && presence.activity ? presence.activity : null,
     group: String(friend.group || friend.groupName || '').slice(0, 60),
+    avatarUrl: presence ? presence.avatarUrl : '',
+    links: friendProfileLinks(label, platformId),
   };
 }
 
@@ -566,33 +1072,85 @@ function validChatMessage(value) {
 }
 
 function storedLeaguePlatformForLive(live) {
-  if (!vault || !vault.isUnlocked() || !live || !live.puuid) return '';
+  if (!vault || !vault.isUnlocked() || !live || !live.puuid) return null;
   const match = vault.listAccounts().find((account) => sameIdentity(account.puuid, live.puuid));
-  return match ? league.canonicalLeaguePlatform(match.leaguePlatformId) || '' : '';
+  if (!match) return null;
+  const platformId = league.canonicalLeaguePlatform(match.leaguePlatformId);
+  const platformSource = String(match.leaguePlatformSource || '').trim();
+  const platformVerifiedAt = String(match.leaguePlatformVerifiedAt || '').trim();
+  const verifiedSources = new Set(['lcu-login-data', 'lcu-region-locale', 'opgg-discovery', 'opgg-tft-discovery']);
+  if (!platformId || !verifiedSources.has(platformSource) || !Number.isFinite(Date.parse(platformVerifiedAt))) return null;
+  return { platformId, platformSource, platformVerifiedAt };
+}
+
+function storedValorantRankForLive(live) {
+  if (!vault || !vault.isUnlocked() || !live || !live.puuid) return null;
+  const account = vault.listAccounts().find((item) => sameIdentity(item.puuid, live.puuid));
+  if (!account) return null;
+  const candidate = account.stats && account.stats.valorant && account.stats.valorant.rank
+    ? account.stats.valorant.rank
+    : {
+      tier: account.rankTier,
+      tierName: account.rankName,
+      rr: account.rr,
+      peakTier: account.peakTier,
+      peakTierName: account.peakName,
+      pastSeasons: [],
+    };
+  if (!candidate || typeof candidate !== 'object') return null;
+  const tier = Number(candidate.tier);
+  const tierName = String(candidate.tierName || candidate.name || '').trim();
+  if ((!Number.isInteger(tier) || tier <= 0) && (!tierName || /^unranked$/i.test(tierName))) return null;
+  return {
+    ...candidate,
+    tier: Number.isInteger(tier) && tier >= 0 && tier < RANK_TIERS.length ? tier : 0,
+    tierName: tierName || RANK_TIERS[tier] || 'Ranked',
+    stale: true,
+    staleReason: 'Live VALORANT rank was unavailable; showing the last verified rank.',
+    authoritative: false,
+    authoritativeUnranked: false,
+    pastSeasons: Array.isArray(candidate.pastSeasons) ? candidate.pastSeasons.slice(-20) : [],
+  };
 }
 
 function verifiedLeaguePlatformPatch(live, leagueStats) {
   const platformId = league.canonicalLeaguePlatform(leagueStats && leagueStats.platformId);
-  if (!platformId || !live || !live.puuid || !leagueStats || !sameIdentity(leagueStats.puuid, live.puuid)) return {};
+  const platformSource = String(leagueStats && leagueStats.platformSource || '').trim();
+  const platformVerifiedAt = String(leagueStats && leagueStats.platformVerifiedAt || '').trim();
+  if (!platformId || !platformSource || !platformVerifiedAt || !live || !live.puuid
+    || !leagueStats || !sameIdentity(leagueStats.puuid, live.puuid)) return {};
   return {
     leaguePlatformId: platformId,
-    leaguePlatformSource: String(leagueStats.platformSource || 'verified'),
-    leaguePlatformVerifiedAt: leagueStats.platformVerifiedAt || new Date().toISOString(),
+    leaguePlatformSource: platformSource,
+    leaguePlatformVerifiedAt: platformVerifiedAt,
   };
 }
 
 async function buildAllStats(live) {
   const liveRiotId = live.gameName && live.tagLine ? `${live.gameName}#${live.tagLine}` : null;
+  let valorantRankError = null;
   const valorantPromise = Promise.all([
-    riot.fetchRank(live).catch(() => null),
+    riot.fetchRank(live).catch((error) => {
+      valorantRankError = safeError(error, 'VALORANT competitive rank is unavailable.');
+      return null;
+    }),
     riot.fetchAccountXP(live).catch(() => ({ level: 0 })),
     riot.fetchWallet(live).catch(() => ({ vp: 0, radianite: 0, kingdom: 0 })),
     riot.fetchPlayerCard(live).catch(() => null),
   ]);
   const lcuPromise = league.buildStats(loadSettings().leaguePath)
     .then((value) => ({ value })).catch((error) => ({ error }));
-  const [[rank, xp, wallet, playerCard], lcuResult] = await Promise.all([valorantPromise, lcuPromise]);
-  const valorant = { available: true, rank, level: xp.level || 0, wallet, playerCard, updatedAt: new Date().toISOString() };
+  const [[freshRank, xp, wallet, playerCard], lcuResult] = await Promise.all([valorantPromise, lcuPromise]);
+  const rank = freshRank || storedValorantRankForLive(live);
+  const valorant = {
+    available: !!rank,
+    rank,
+    level: xp.level || 0,
+    wallet,
+    playerCard,
+    error: rank ? null : (valorantRankError || 'VALORANT competitive rank is unavailable.'),
+    updatedAt: new Date().toISOString(),
+  };
 
   let verifiedLcu = null;
   let lcuError = lcuResult.error ? safeError(lcuResult.error, 'League client is unavailable.') : null;
@@ -603,46 +1161,98 @@ async function buildAllStats(live) {
     else verifiedLcu = lcu;
   }
 
-  let opggResult = { error: new Error('A complete Riot ID and PUUID are required for OP.GG lookup.') };
-  let onlineTftResult = { error: new Error('A complete Riot ID and PUUID are required for OP.GG TFT lookup.') };
+  let opggResult = { error: new Error('A complete Riot ID and live PUUID are required for OP.GG lookup.') };
+  let onlineTftResult = { error: new Error('A complete Riot ID and live PUUID are required for OP.GG TFT lookup.') };
+  let trustedPlatform = null;
   if (liveRiotId && live.puuid) {
     const lcuPlatform = verifiedLcu && league.canonicalLeaguePlatform(verifiedLcu.platformId);
     const storedPlatform = storedLeaguePlatformForLive(live);
-    const leagueLookup = lcuPlatform
-      ? league.fetchOpggStats(liveRiotId, lcuPlatform, live.puuid)
-        .then((value) => ({ value: { ...value, platformSource: verifiedLcu.platformSource } }))
-        .catch((error) => ({ error }))
-      : league.discoverOpggStats(liveRiotId, live.puuid, storedPlatform)
-        .then((value) => ({ value })).catch((error) => ({ error }));
-    const tftLookup = verifiedLcu
-      ? Promise.resolve({ value: null })
-      : league.discoverOpggTftStats(liveRiotId, live.puuid, storedPlatform)
-        .then((value) => ({ value })).catch((error) => ({ error }));
-    [opggResult, onlineTftResult] = await Promise.all([leagueLookup, tftLookup]);
+    trustedPlatform = lcuPlatform
+      ? {
+        platformId: lcuPlatform,
+        platformSource: verifiedLcu.platformSource,
+        platformVerifiedAt: new Date().toISOString(),
+      }
+      : storedPlatform;
+
+    const acceptOnPlatform = (promise, platform) => promise.then((value) => ({ value: {
+      ...value,
+      platformSource: platform.platformSource,
+      platformVerifiedAt: platform.platformVerifiedAt,
+    } })).catch((error) => ({ error }));
+    const fetchOnPlatform = (platform) => Promise.all([
+      acceptOnPlatform(league.fetchOpggStats(liveRiotId, platform.platformId, live.puuid), platform),
+      acceptOnPlatform(league.fetchOpggTftStats(liveRiotId, platform.platformId, live.puuid), platform),
+    ]);
+
+    if (trustedPlatform) {
+      [opggResult, onlineTftResult] = await fetchOnPlatform(trustedPlatform);
+    }
+
+    const directIdentityFailure = [opggResult.error, onlineTftResult.error]
+      .some((error) => /PUUID|exact match|identity did not match/i.test(String(error && error.message || '')));
+    if (!trustedPlatform || (!opggResult.value && !onlineTftResult.value && directIdentityFailure)) {
+      const preferredPlatform = trustedPlatform && trustedPlatform.platformId || '';
+      let leagueDiscoveryError = null;
+      try {
+        const discovered = await league.discoverOpggStats(liveRiotId, live.puuid, preferredPlatform, { timeoutMs: 20000 });
+        trustedPlatform = {
+          platformId: league.canonicalLeaguePlatform(discovered.platformId),
+          platformSource: discovered.platformSource,
+          platformVerifiedAt: new Date().toISOString(),
+        };
+        opggResult = { value: { ...discovered, ...trustedPlatform } };
+        onlineTftResult = await acceptOnPlatform(
+          league.fetchOpggTftStats(liveRiotId, trustedPlatform.platformId, live.puuid),
+          trustedPlatform,
+        );
+      } catch (error) {
+        leagueDiscoveryError = error;
+        try {
+          const discovered = await league.discoverOpggTftStats(liveRiotId, live.puuid, preferredPlatform, { timeoutMs: 20000 });
+          trustedPlatform = {
+            platformId: league.canonicalLeaguePlatform(discovered.platformId),
+            platformSource: discovered.platformSource,
+            platformVerifiedAt: new Date().toISOString(),
+          };
+          onlineTftResult = { value: { ...discovered, ...trustedPlatform } };
+          opggResult = await acceptOnPlatform(
+            league.fetchOpggStats(liveRiotId, trustedPlatform.platformId, live.puuid),
+            trustedPlatform,
+          );
+        } catch (tftDiscoveryError) {
+          if (!trustedPlatform) {
+            opggResult = { error: leagueDiscoveryError };
+            onlineTftResult = { error: tftDiscoveryError };
+          }
+        }
+      }
+    }
   }
 
-  const verifiedOpgg = opggResult.value
-    && opggResult.value.puuid
-    && sameIdentity(opggResult.value.puuid, live.puuid)
-    && sameIdentity(opggResult.value.riotId, liveRiotId)
-    && league.canonicalLeaguePlatform(opggResult.value.platformId)
-    ? opggResult.value
-    : null;
+  const acceptProviderStats = (value) => {
+    // Weakened verification: an exact, globally-unique Riot ID on the trusted
+    // platform is accepted even if OP.GG's indexed PUUID is stale/mismatched.
+    // A matching provider PUUID still upgrades the recorded identity basis.
+    if (!value || !sameIdentity(value.riotId, liveRiotId) || !trustedPlatform
+      || league.canonicalLeaguePlatform(value.platformId) !== trustedPlatform.platformId) return null;
+    const { providerPuuid, providerPuuidCorroborated, ...safeProviderStats } = value;
+    const corroborated = providerPuuidCorroborated || (providerPuuid && sameIdentity(providerPuuid, live.puuid));
+    return {
+      ...safeProviderStats,
+      puuid: live.puuid,
+      identityBasis: corroborated ? 'provider-puuid-corroborated' : 'exact-riot-id+verified-platform',
+    };
+  };
+  const verifiedOpgg = acceptProviderStats(opggResult.value);
   const opggIdentityError = opggResult.value && !verifiedOpgg
-    ? 'OP.GG returned a different PUUID, Riot ID, or invalid League platform, so its data was rejected.'
+    ? 'OP.GG returned a different provider PUUID, Riot ID, or League platform, so its data was rejected.'
     : null;
-  const verifiedOnlineTft = onlineTftResult.value
-    && onlineTftResult.value.puuid
-    && sameIdentity(onlineTftResult.value.puuid, live.puuid)
-    && sameIdentity(onlineTftResult.value.riotId, liveRiotId)
-    && league.canonicalLeaguePlatform(onlineTftResult.value.platformId)
-    ? onlineTftResult.value
-    : null;
+  const verifiedOnlineTft = acceptProviderStats(onlineTftResult.value);
   const onlineTftIdentityError = onlineTftResult.value && !verifiedOnlineTft
-    ? 'OP.GG TFT returned a different PUUID, Riot ID, or invalid League platform, so its data was rejected.'
+    ? 'OP.GG TFT returned a different provider PUUID, Riot ID, or League platform, so its data was rejected.'
     : null;
   const verifiedTftPlatform = league.canonicalLeaguePlatform(verifiedOnlineTft && verifiedOnlineTft.platformId);
-  const platformVerifiedAt = new Date().toISOString();
 
   let leagueStats;
   if (verifiedOpgg) {
@@ -650,8 +1260,8 @@ async function buildAllStats(live) {
       ...verifiedOpgg,
       puuid: live.puuid,
       platformId: league.canonicalLeaguePlatform(verifiedOpgg.platformId),
-      platformSource: verifiedOpgg.platformSource || 'opgg-discovery',
-      platformVerifiedAt,
+      platformSource: verifiedOpgg.platformSource,
+      platformVerifiedAt: verifiedOpgg.platformVerifiedAt,
       level: verifiedLcu && verifiedLcu.summonerLevel || verifiedOpgg.level || 0,
       profileIconId: verifiedLcu && verifiedLcu.profileIconId || null,
     };
@@ -659,47 +1269,71 @@ async function buildAllStats(live) {
     const platformId = league.canonicalLeaguePlatform(verifiedLcu.platformId);
     leagueStats = {
       available: true,
-      puuid: verifiedLcu.puuid || null,
-      riotId: verifiedLcu.riotId,
+      puuid: live.puuid,
+      identityBasis: 'same-puuid-lcu',
+      riotId: liveRiotId || verifiedLcu.riotId,
       platformId,
       platformSource: platformId ? verifiedLcu.platformSource : null,
-      platformVerifiedAt: platformId ? platformVerifiedAt : null,
+      platformVerifiedAt: platformId && trustedPlatform ? trustedPlatform.platformVerifiedAt : null,
       level: verifiedLcu.summonerLevel,
       profileIconId: verifiedLcu.profileIconId,
       queues: verifiedLcu.league,
+      pastSeasons: [],
+      providerError: opggIdentityError || (opggResult.error && safeError(opggResult.error, 'OP.GG profile data is unavailable.')),
       source: 'lcu',
       updatedAt: new Date().toISOString(),
     };
   } else {
-    const reason = verifiedTftPlatform
-      ? 'OP.GG verified the account platform through TFT, but identity-verified League rank data is unavailable.'
-      : opggIdentityError || (opggResult.error && safeError(opggResult.error, 'OP.GG profile data is unavailable.'));
+    const platformId = trustedPlatform && trustedPlatform.platformId || verifiedTftPlatform;
+    const reason = opggIdentityError || (opggResult.error && safeError(opggResult.error, 'OP.GG profile data is unavailable.'));
     leagueStats = {
       available: false,
-      puuid: verifiedTftPlatform ? live.puuid : null,
-      riotId: verifiedTftPlatform ? liveRiotId : null,
-      platformId: verifiedTftPlatform,
-      platformSource: verifiedTftPlatform ? verifiedOnlineTft.platformSource || 'opgg-tft-discovery' : null,
-      platformVerifiedAt: verifiedTftPlatform ? platformVerifiedAt : null,
+      puuid: platformId ? live.puuid : null,
+      riotId: platformId ? liveRiotId : null,
+      platformId: platformId || null,
+      platformSource: platformId && trustedPlatform ? trustedPlatform.platformSource : null,
+      platformVerifiedAt: platformId && trustedPlatform ? trustedPlatform.platformVerifiedAt : null,
       queues: [],
+      pastSeasons: [],
       error: reason || 'OP.GG profile data is unavailable and League Client is not connected.',
     };
   }
 
   const onlineTftError = onlineTftIdentityError
     || (onlineTftResult.error && safeError(onlineTftResult.error, 'OP.GG TFT profile data is unavailable.'));
-  const tftStats = verifiedLcu
-    ? {
+  let tftStats;
+  if (verifiedLcu) {
+    tftStats = {
       available: true,
-      puuid: verifiedLcu.puuid || null,
-      riotId: verifiedLcu.riotId,
+      puuid: live.puuid,
+      identityBasis: 'same-puuid-lcu',
+      riotId: liveRiotId || verifiedLcu.riotId,
+      platformId: trustedPlatform && trustedPlatform.platformId || null,
+      platformSource: trustedPlatform && trustedPlatform.platformSource || null,
+      platformVerifiedAt: trustedPlatform && trustedPlatform.platformVerifiedAt || null,
       level: verifiedLcu.summonerLevel,
       profileIconId: verifiedLcu.profileIconId,
       queues: verifiedLcu.tft,
-      source: 'lcu',
+      pastSeasons: verifiedOnlineTft && verifiedOnlineTft.pastSeasons || [],
+      providerError: verifiedOnlineTft ? null : onlineTftError,
+      source: verifiedOnlineTft ? 'lcu+opgg' : 'lcu',
       updatedAt: new Date().toISOString(),
-    }
-    : verifiedOnlineTft || { available: false, queues: [], error: onlineTftError || lcuError || 'League client is unavailable for TFT data.' };
+    };
+  } else if (verifiedOnlineTft) {
+    tftStats = verifiedOnlineTft;
+  } else {
+    tftStats = {
+      available: false,
+      puuid: trustedPlatform ? live.puuid : null,
+      riotId: trustedPlatform ? liveRiotId : null,
+      platformId: trustedPlatform && trustedPlatform.platformId || null,
+      platformSource: trustedPlatform && trustedPlatform.platformSource || null,
+      platformVerifiedAt: trustedPlatform && trustedPlatform.platformVerifiedAt || null,
+      queues: [],
+      pastSeasons: [],
+      error: onlineTftError || lcuError || 'League client is unavailable for TFT data.',
+    };
+  }
 
   return { valorant, league: leagueStats, tft: tftStats };
 }
@@ -756,6 +1390,221 @@ async function buildCurrentSessionView(live = null, existingStats = null) {
   return current;
 }
 
+function cachedStatsForLive(live) {
+  const account = vault && vault.isUnlocked() && live && live.puuid
+    ? vault.listAccounts().find((item) => sameIdentity(item.puuid, live.puuid))
+    : null;
+  const stored = account && displaySafeStats(account.stats);
+  const validSection = (game) => {
+    const section = stored && stored[game];
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return null;
+    if (game !== 'valorant' && (!section.puuid || !sameIdentity(section.puuid, live.puuid))) return null;
+    return section;
+  };
+  const storedRank = storedValorantRankForLive(live);
+  const platformId = account && league.canonicalLeaguePlatform(account.leaguePlatformId);
+  const riotId = live && live.gameName && live.tagLine ? `${live.gameName}#${live.tagLine}` : null;
+  return {
+    valorant: validSection('valorant') || {
+      available: Boolean(storedRank),
+      rank: storedRank,
+      level: Number(account && account.level || 0),
+      wallet: { vp: 0, radianite: 0, kingdom: 0 },
+      playerCard: null,
+      error: storedRank ? null : 'Live stats are refreshing.',
+    },
+    league: validSection('league') || {
+      available: false,
+      puuid: platformId ? live.puuid : null,
+      riotId: platformId ? riotId : null,
+      platformId: platformId || null,
+      platformSource: platformId ? account.leaguePlatformSource || null : null,
+      platformVerifiedAt: platformId ? account.leaguePlatformVerifiedAt || null : null,
+      queues: [],
+      pastSeasons: [],
+      error: 'League stats are refreshing.',
+    },
+    tft: validSection('tft') || {
+      available: false,
+      puuid: platformId ? live.puuid : null,
+      riotId: platformId ? riotId : null,
+      platformId: platformId || null,
+      platformSource: platformId ? account.leaguePlatformSource || null : null,
+      platformVerifiedAt: platformId ? account.leaguePlatformVerifiedAt || null : null,
+      queues: [],
+      pastSeasons: [],
+      error: 'TFT stats are refreshing.',
+    },
+  };
+}
+
+async function buildFastCurrentSessionView(live = null) {
+  const active = live || await riot.resolveChatSession();
+  return buildCurrentSessionView(active, cachedStatsForLive(active));
+}
+
+async function refreshVerifiedAccountStats(accountId, expectedPuuid, game = '') {
+  const before = await riot.resolveSession();
+  if (!exactPuuidMatch(before && before.puuid, expectedPuuid)) return false;
+  const currentSession = await buildCurrentSessionView(before);
+  const after = await riot.resolveChatSession();
+  if (!exactPuuidMatch(after && after.puuid, expectedPuuid)
+    || !exactPuuidMatch(before.puuid, after.puuid)) return false;
+  const account = vault && vault.isUnlocked()
+    ? vault.listAccounts().find((item) => item.id === accountId)
+    : null;
+  if (!account || !exactPuuidMatch(account.puuid, expectedPuuid)) return false;
+  const rank = currentSession.stats.valorant.rank;
+  vault.patchAccount(accountId, {
+    riotId: currentSession.riotId || account.riotId,
+    ...verifiedLeaguePlatformPatch(before, currentSession.stats.league),
+    level: currentSession.stats.valorant.level,
+    rankTier: rank ? rank.tier : undefined,
+    rankName: rank ? rank.tierName : undefined,
+    rr: rank ? rank.rr : undefined,
+    peakTier: rank ? rank.peakTier : undefined,
+    peakName: rank ? rank.peakTierName : undefined,
+    stats: currentSession.stats,
+    portraitSource: currentSession.portraitSource,
+    portraitId: currentSession.portraitId,
+    portraitUrl: currentSession.portraitUrl,
+    portraitWideUrl: currentSession.portraitWideUrl,
+    portraitPuuid: currentSession.portraitPuuid,
+    lastSynced: new Date().toISOString(),
+  });
+  updateDiscordContext(currentSession, game);
+  return true;
+}
+
+function rankForDiscord(view, game) {
+  const stats = view && view.stats || {};
+  if (game === 'valorant') {
+    const rank = stats.valorant && stats.valorant.rank;
+    return rank && (rank.tierName || rank.name) ? `${rank.tierName || rank.name}${Number.isFinite(rank.rr) ? ` · ${rank.rr} RR` : ''}` : '';
+  }
+  const queues = game === 'tft' ? stats.tft && stats.tft.queues : stats.league && stats.league.queues;
+  const queue = Array.isArray(queues) ? queues.find((item) => item && (item.tier || item.rank)) : null;
+  return queue ? [queue.tier, queue.rank, Number.isFinite(queue.leaguePoints) ? `${queue.leaguePoints} LP` : ''].filter(Boolean).join(' ') : '';
+}
+
+function discordLiveEnabled(settings = loadSettings()) {
+  return settings.discordPresenceEnabled === true && settings.discordShowLiveMatch === true && !!String(settings.discordClientId || '').trim();
+}
+
+function clearDiscordLiveContext() {
+  if (!discordContext || !discordContext.live) return;
+  discordContext = { ...discordContext, live: null };
+  if (discordPresence) discordPresence.setContext(discordContext);
+}
+
+function stopDiscordLivePolling(clearLive = true) {
+  discordLiveGeneration += 1;
+  if (discordLiveTimer) clearInterval(discordLiveTimer);
+  discordLiveTimer = null;
+  discordLiveInFlight = false;
+  if (clearLive) clearDiscordLiveContext();
+}
+
+function liveActivityPriority(value) {
+  const phase = String(value && value.phaseCode || '').toLowerCase();
+  if (phase === 'ingame' || phase === 'inprogress') return 5;
+  if (phase === 'pregame' || phase === 'champselect' || phase === 'gamestart') return 4;
+  if (phase === 'matchmaking' || phase === 'readycheck') return 3;
+  return value ? 1 : 0;
+}
+
+async function pollDiscordLiveActivity() {
+  if (discordLiveInFlight || accountSwitchInProgress || !discordVerifiedPuuid || !vault || !vault.isUnlocked() || !discordLiveEnabled()) return;
+  const generation = discordLiveGeneration;
+  const expectedPuuid = discordVerifiedPuuid;
+  discordLiveInFlight = true;
+  try {
+    const liveSession = await riot.resolveSession();
+    if (generation !== discordLiveGeneration || !sameIdentity(liveSession.puuid, expectedPuuid)) throw new Error('identity-changed');
+    const rosterMatch = vault.listAccounts().some((account) => sameIdentity(account.puuid, expectedPuuid));
+    if (!rosterMatch) throw new Error('identity-unlinked');
+    const settings = loadSettings();
+    const [valorantResult, leagueResult] = await Promise.allSettled([
+      riot.fetchValorantLive(liveSession),
+      league.fetchLiveSession(settings.leaguePath, expectedPuuid),
+    ]);
+    const verified = await riot.resolveChatSession();
+    if (generation !== discordLiveGeneration || accountSwitchInProgress || !sameIdentity(verified.puuid, expectedPuuid)) throw new Error('identity-changed');
+    const candidates = [
+      valorantResult.status === 'fulfilled' ? valorantResult.value : null,
+      leagueResult.status === 'fulfilled' ? leagueResult.value : null,
+    ].filter(Boolean).sort((a, b) => liveActivityPriority(b) - liveActivityPriority(a));
+    const live = candidates[0] || null;
+    if (!discordContext) return;
+    const selected = live && live.product && GAMES[live.product] ? live.product : live && live.product;
+    discordContext = {
+      ...discordContext,
+      game: live && live.game || discordContext.game,
+      rank: selected && discordRankByGame[selected] || discordContext.rank,
+      live,
+    };
+    if (discordPresence) discordPresence.setContext(discordContext);
+  } catch (error) {
+    if (generation !== discordLiveGeneration) return;
+    if (/identity-(?:changed|unlinked)/.test(String(error && error.message))) {
+      discordVerifiedPuuid = null;
+      discordRankByGame = {};
+      discordContext = null;
+      if (discordPresence) discordPresence.setContext(null);
+      stopDiscordLivePolling(false);
+    } else clearDiscordLiveContext();
+  } finally {
+    if (generation === discordLiveGeneration) discordLiveInFlight = false;
+  }
+}
+
+function reconcileDiscordLivePolling() {
+  if (!discordLiveEnabled() || !discordVerifiedPuuid || !vault || !vault.isUnlocked()) {
+    stopDiscordLivePolling(true);
+    return;
+  }
+  if (discordLiveTimer) return;
+  discordLiveGeneration += 1;
+  pollDiscordLiveActivity();
+  discordLiveTimer = setInterval(pollDiscordLiveActivity, 12000);
+  if (typeof discordLiveTimer.unref === 'function') discordLiveTimer.unref();
+}
+
+function updateDiscordContext(view, game = '') {
+  const settings = loadSettings();
+  const verified = view && view.puuid && Array.isArray(view.matchingAccountIds) && view.matchingAccountIds.length > 0;
+  if (!verified) {
+    discordVerifiedPuuid = null;
+    discordRankByGame = {};
+    discordContext = null;
+    if (discordPresence) discordPresence.setContext(null);
+    stopDiscordLivePolling(false);
+    return discordPresence ? discordPresence.getState() : { enabled: false, connected: false };
+  }
+  const selected = game && GAMES[game] ? game : '';
+  discordVerifiedPuuid = view.puuid;
+  discordRankByGame = {
+    valorant: rankForDiscord(view, 'valorant'), league: rankForDiscord(view, 'lol'),
+    lol: rankForDiscord(view, 'lol'), tft: rankForDiscord(view, 'tft'),
+  };
+  discordContext = {
+    game: selected ? GAMES[selected].label : 'Riot Relay',
+    rank: selected ? discordRankByGame[selected] : '',
+    riotId: settings.hideDisplayNames ? '' : view.riotId,
+    status: settings.useDeceive ? (settings.deceiveStatus === 'chat' ? 'Online' : String(settings.deceiveStatus || 'Offline')) : 'Signed in',
+    live: null,
+  };
+  if (discordPresence) discordPresence.setContext(discordContext);
+  reconcileDiscordLivePolling();
+  return discordPresence ? discordPresence.getState() : { enabled: false, connected: false };
+}
+
+async function refreshDiscordContext(game = '') {
+  requireUnlocked();
+  const view = await buildCurrentSessionView();
+  return updateDiscordContext(view, game);
+}
+
 /** Poll until the target identity is matched or a stable outcome is known. */
 function settleBefore(promise, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -770,6 +1619,8 @@ function settleBefore(promise, timeoutMs) {
 async function verifyActiveAccount(account, timeoutMs = 30000, allowUserVerification = false) {
   if (!account || !account.puuid) return { status: 'timeout', reason: 'Selected roster entry is not linked to a PUUID.' };
   const deadline = Date.now() + timeoutMs;
+  let matchedPuuid = null;
+  let matchedSamples = 0;
   let wrongPuuid = null;
   let wrongSamples = 0;
   let unauthenticatedSamples = 0;
@@ -777,27 +1628,119 @@ async function verifyActiveAccount(account, timeoutMs = 30000, allowUserVerifica
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     try {
+      // Use the entitlements-based session (subject/PUUID), which becomes
+      // available immediately after Riot authenticates. Chat comes up several
+      // seconds later, so probing chat here caused false "not authenticated"
+      // results and broke instant session restore. Two consecutive exact
+      // samples still prevent a transient/stale session from completing early.
       const live = await settleBefore(riot.resolveSession(), remaining);
       if (live && live.puuid) {
         unauthenticatedSamples = 0;
         lastLive = live;
-        if (sameIdentity(live.puuid, account.puuid)) return { status: 'matched', live };
-        if (sameIdentity(live.puuid, wrongPuuid)) wrongSamples += 1;
-        else { wrongPuuid = live.puuid; wrongSamples = 1; }
-        if (wrongSamples >= 3) return { status: 'mismatched', live };
+        if (sameIdentity(live.puuid, account.puuid)) {
+          wrongPuuid = null;
+          wrongSamples = 0;
+          if (sameIdentity(live.puuid, matchedPuuid)) matchedSamples += 1;
+          else { matchedPuuid = live.puuid; matchedSamples = 1; }
+          if (matchedSamples >= 2) return { status: 'matched', live };
+        } else {
+          matchedPuuid = null;
+          matchedSamples = 0;
+          if (sameIdentity(live.puuid, wrongPuuid)) wrongSamples += 1;
+          else { wrongPuuid = live.puuid; wrongSamples = 1; }
+          if (wrongSamples >= 3) return { status: 'mismatched', live };
+        }
       }
     } catch {
+      matchedPuuid = null;
+      matchedSamples = 0;
       // A persistent lockfile with no entitlements/session is the signed-out
-      // login form. Require several samples so normal startup is not mistaken
-      // for an expired snapshot. During post-login, keep waiting for manual 2FA.
+      // login form. Repeated samples avoid treating normal startup as an auth
+      // failure while the client is still coming up.
       unauthenticatedSamples = riot.isRunning() ? unauthenticatedSamples + 1 : 0;
-      if (unauthenticatedSamples >= 12 && !allowUserVerification) return { status: 'unauthenticated' };
+      const requiredSamples = allowUserVerification ? 8 : 12;
+      if (unauthenticatedSamples >= requiredSamples) {
+        return allowUserVerification
+          ? {
+            status: 'authentication-not-confirmed',
+            reason: 'Riot did not authenticate. Verify the saved username/password or complete Riot’s verification challenge.',
+          }
+          : { status: 'unauthenticated' };
+      }
     }
     const waitMs = Math.min(1000, Math.max(0, deadline - Date.now()));
     if (waitMs) await wait(waitMs);
   }
   if (!lastLive && riot.isRunning()) return { status: 'unauthenticated' };
   return { status: 'timeout', live: lastLive || undefined };
+}
+
+async function waitForHealthyRiotSession(account, { timeoutMs = 30000, requireDeceive = false } = {}) {
+  if (!account || !account.puuid) throw new Error(safeError('The selected account is not linked to a verified identity.', 'Identity verification failed.'));
+  const requestedTimeout = Number(timeoutMs);
+  const boundedTimeoutMs = Math.min(60000, Math.max(1000, Number.isFinite(requestedTimeout) ? requestedTimeout : 30000));
+  const deadline = Date.now() + boundedTimeoutMs;
+  let lastReason = '';
+  let healthySamples = 0;
+  let identityHealthy = false;
+
+  const assertExpectedChatPuuid = (sessionView, phase) => {
+    const observed = sessionView && sessionView.puuid;
+    if (!observed) throw new Error(safeError('Riot chat identity is not ready.', 'Riot chat is not ready.'));
+    if (!exactPuuidMatch(observed, account.puuid)) {
+      const error = new Error(safeError(`The active Riot chat identity changed ${phase}; product launch was stopped.`, 'Riot identity changed; product launch was stopped.'));
+      error.code = 'RIOT_IDENTITY_CHANGED';
+      throw error;
+    }
+  };
+
+  while (Date.now() < deadline) {
+    try {
+      let remaining = Math.max(1, deadline - Date.now());
+      const beforeFriends = await settleBefore(riot.resolveChatSession(), remaining);
+      assertExpectedChatPuuid(beforeFriends, 'before friends verification');
+
+      remaining = Math.max(1, deadline - Date.now());
+      await settleBefore(riot.fetchChatFriends(), remaining);
+
+      remaining = Math.max(1, deadline - Date.now());
+      const afterFriends = await settleBefore(riot.resolveChatSession(), remaining);
+      assertExpectedChatPuuid(afterFriends, 'during friends verification');
+      if (!exactPuuidMatch(beforeFriends.puuid, afterFriends.puuid)) {
+        const error = new Error(safeError('The Riot chat identity changed during friends verification; product launch was stopped.', 'Riot identity changed; product launch was stopped.'));
+        error.code = 'RIOT_IDENTITY_CHANGED';
+        throw error;
+      }
+
+      healthySamples += 1;
+      identityHealthy = true;
+      if (healthySamples >= 2) {
+        // The exact-PUUID identity and friends session are the authoritative
+        // health signal. When Deceive is active we prefer to also confirm this
+        // proxy instance observed the roster, but that only happens once the
+        // game connects chat — which may lag behind identity readiness (or the
+        // game may still be patching / waiting on PLAY). Treat it as a
+        // best-effort signal, never a launch-blocking failure.
+        if (requireDeceive) {
+          const proxyState = deceiveProxy && deceiveProxy.getState();
+          const rosterObserved = !!(proxyState && proxyState.running && proxyState.chatConnected === true);
+          return { ready: true, deceiveRosterObserved: rosterObserved };
+        }
+        return { ready: true };
+      }
+    } catch (error) {
+      healthySamples = 0;
+      if (error && error.code === 'RIOT_IDENTITY_CHANGED') throw error;
+      lastReason = safeError(error, 'Riot social services are not ready.');
+    }
+    const waitMs = Math.min(500, Math.max(0, deadline - Date.now()));
+    if (waitMs) await wait(waitMs);
+  }
+  // If the identity/friends session was healthy at least once but two
+  // consecutive samples did not line up before the deadline, still allow the
+  // launch to proceed rather than aborting a working switch.
+  if (identityHealthy) return { ready: true, deceiveRosterObserved: false };
+  throw new Error(safeError(`Riot friends did not become ready. Product launch was stopped. ${lastReason || 'Retry after Riot Client finishes starting.'}`, 'Riot friends did not become ready.'));
 }
 
 // ---- Window controls -------------------------------------------------------
@@ -839,12 +1782,14 @@ handle('vault:hello-options', async (purpose) => {
 handle('vault:create', async ({ masterPassword }) => {
   if (!masterPassword || masterPassword.length < 4) throw new Error('Master password must be at least 4 characters.');
   vault.create(masterPassword);
+  if (discordPresence) discordPresence.setAvailable(true);
   return annotate(vault.listAccounts());
 });
 
 handle('vault:unlock', async ({ masterPassword }) => {
   try { vault.unlock(masterPassword); }
   catch { throw new Error('Incorrect master password or the vault could not be opened.'); }
+  if (discordPresence) discordPresence.setAvailable(true);
   return annotate(vault.listAccounts());
 });
 
@@ -854,10 +1799,22 @@ handle('vault:unlock-parked', async (assertion = null) => {
   if (mode === 'hello') webauthn.finishAuthentication(assertion, credential);
   try { vault.unlockWithParkedKey(mode, credential); }
   catch { throw new Error('The stored key is invalid, unavailable, or not enabled for this vault.'); }
+  if (discordPresence) discordPresence.setAvailable(true);
   return annotate(vault.listAccounts());
 });
 
-handle('vault:lock', async () => { vault.lock(); return true; });
+handle('vault:lock', async () => {
+  stopDiscordLivePolling(false);
+  discordVerifiedPuuid = null;
+  discordRankByGame = {};
+  if (discordPresence) {
+    discordPresence.setContext(null);
+    discordPresence.setAvailable(false);
+  }
+  discordContext = null;
+  vault.lock();
+  return true;
+});
 
 handle('vault:set-key-storage', async (payload) => {
   requireUnlocked();
@@ -941,7 +1898,11 @@ handle('session:clear', async (accountId) => {
 
 handle('riot:is-running', async () => riot.isRunning());
 
-handle('riot:current-session', async () => buildCurrentSessionView());
+handle('riot:current-session', async () => {
+  const view = await buildFastCurrentSessionView();
+  updateDiscordContext(view);
+  return view;
+});
 
 handle('riot:all-stats', async () => {
   const live = await riot.resolveSession();
@@ -993,7 +1954,7 @@ handle('riot:refresh-account', async (payload) => {
 handle('account:switch', async (payload) => runAccountSwitch(async () => {
   requireUnlocked();
   const id = typeof payload === 'object' && payload ? payload.id : payload;
-  const requestedGame = typeof payload === 'object' && payload && ['valorant', 'lol', 'tft'].includes(payload.launchGame)
+  const requestedGame = typeof payload === 'object' && payload && Object.prototype.hasOwnProperty.call(GAMES, payload.launchGame)
     ? payload.launchGame
     : null;
   const settings = loadSettings();
@@ -1005,6 +1966,7 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
   const snapshot = session.validateSession(userData, id, acc);
   const instant = snapshot.available && snapshot.identityVerified;
   const loginMode = settings.autoFill ? 'native-required' : 'manual';
+  const hasConfigBinding = !!(requestedGame && configProfiles && configProfiles.hasBinding(acc, requestedGame));
 
   appendSwitchLog('START', {
     loginMode,
@@ -1015,56 +1977,140 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
     launchGame: requestedGame,
   });
   const send = (label) => {
-    appendSwitchLog('STAGE', { label });
-    if (mainWindow) mainWindow.webContents.send('switch:progress', { id, label, at: new Date().toISOString() });
+    const publicLabel = safeProgressLabel(label);
+    appendSwitchLog('STAGE', { label: publicLabel });
+    if (mainWindow) mainWindow.webContents.send('switch:progress', { label: publicLabel, at: new Date().toISOString() });
   };
-
-  // Never restart Riot when the requested PUUID is already active.
-  if (acc.puuid) {
-    try {
-      const live = await riot.resolveSession();
-      if (sameIdentity(live.puuid, acc.puuid)) {
-        send('Requested account is already active.');
-        if (requestedGame) {
-          const client = findRiotClient(settings.clientPath);
-          if (!client) throw new Error('Riot Client not found. Set its path in Settings.');
-          launchClient(client, { game: requestedGame });
-          send(`Launching ${GAMES[requestedGame].label} without restarting the session…`);
-        }
-        const currentSession = await buildCurrentSessionView(live);
-        return {
-          instant: true,
-          mode: 'already-active',
-          launchedGame: requestedGame,
-          verified: true,
-          verification: { status: 'matched' },
-          currentSession,
-          accounts: annotate(vault.listAccounts()),
-          sessionCapture: { captured: false, reason: 'already-active' },
-        };
-      }
-    } catch { /* no authenticated Riot session; continue with the switch */ }
-  }
-
-  let configUrl = '';
-  if (settings.useDeceive) {
+  const startOfflineProxy = async () => {
+    if (!settings.useDeceive) return '';
     try {
       if (deceiveProxy) deceiveProxy.stop();
       deceiveProxy = new DeceiveProxy(app.getPath('userData'), {
-        launchProduct: requestedGame === 'lol' || requestedGame === 'tft' ? 'league' : requestedGame === 'valorant' ? 'valorant' : 'unknown',
+        launchProduct: requestedGame === 'lol' || requestedGame === 'tft'
+          ? 'league'
+          : requestedGame === 'valorant' ? 'valorant' : 'unknown',
         preserveParty: settings.deceivePreserveParty !== false,
         activityMode: settings.deceiveActivityMode || 'hide',
         customStatus: settings.deceiveCustomStatus || '',
         leagueHelper: settings.deceiveLeagueHelper !== false,
       });
       send('Starting offline proxy…');
-      const res = await deceiveProxy.start(settings.deceiveStatus || 'offline');
-      configUrl = res.configUrl;
+      const started = await deceiveProxy.start(settings.deceiveStatus || 'offline');
+      return started.configUrl;
     } catch (error) {
       if (deceiveProxy) deceiveProxy.lastError = safeError(error, 'Offline proxy unavailable.');
-      send(`Offline proxy unavailable (${error.message}) — launching normally.`);
+      send('Offline proxy unavailable — launching normally.');
+      return '';
     }
+  };
+
+  // Keep an already-active verified session intact unless configuration must
+  // be written offline or Deceive must own the relaunched Riot connection.
+  // Lookup failure remains recoverable; after an exact match, later failures
+  // propagate instead of falling through into the normal destructive switch.
+  let alreadyActive = null;
+  if (acc.puuid) {
+    try { alreadyActive = await riot.resolveSession(); }
+    catch { alreadyActive = null; }
   }
+  if (alreadyActive && exactPuuidMatch(alreadyActive.puuid, acc.puuid)) {
+    send('Requested account is already active.');
+    let configMigration = null;
+    let launchRequested = false;
+    let launcherAccepted = false;
+    let launchVerified = false;
+    if (requestedGame) {
+      let restartRequired = false;
+      try {
+        send('Verifying the active Riot identity and friends session before restart…');
+        await waitForHealthyRiotSession(acc, { timeoutMs: 30000, requireDeceive: false });
+        const client = findRiotClient(settings.clientPath);
+        if (!client) throw new Error('Riot Client not found. Set its path in Settings.');
+
+        let activeConfigUrl = '';
+        if (hasConfigBinding || settings.useDeceive === true) {
+          send('Closing Riot processes before the offline configuration write and proxy launch…');
+          await killRiotProcesses();
+          restartRequired = true;
+          await wait(1200);
+        }
+        if (settings.useDeceive === true) activeConfigUrl = await startOfflineProxy();
+
+        if (hasConfigBinding) {
+          const migrated = configProfiles.applyForTarget(acc, requestedGame);
+          const changed = Number(migrated.changed || 0);
+          const unchanged = Number(migrated.unchanged || 0);
+          const skipped = Number(migrated.skipped || 0);
+          if (skipped > 0) {
+            throw new Error(`The ${GAMES[requestedGame].label} profile had ${skipped} unmapped preference file${skipped === 1 ? '' : 's'}; launch was stopped.`);
+          }
+          send(changed
+            ? `Rewrote ${changed} allowlisted ${GAMES[requestedGame].label} preference file${changed === 1 ? '' : 's'} offline (${unchanged} already matched; backup retained). Game-start verification is pending.`
+            : `All ${unchanged} allowlisted ${GAMES[requestedGame].label} preference files already matched; no live files were rewritten. Game-start verification is pending.`);
+          configMigration = {
+            ...migrated,
+            localWriteVerified: true,
+            postLaunchVerified: false,
+            contentVerifiedAfterProductStart: false,
+          };
+        }
+
+        send(`Sending the ${GAMES[requestedGame].label} launch request to Riot Client…`);
+        launchRequested = true;
+        const productLaunch = await launchProduct(client, {
+          game: requestedGame,
+          configUrl: activeConfigUrl,
+        });
+        launcherAccepted = productLaunch.launcherAccepted === true;
+        launchVerified = productLaunch.launchVerified === true;
+        send(launchVerified
+          ? `${GAMES[requestedGame].label} is starting.`
+          : `Riot Client accepted the ${GAMES[requestedGame].label} launch request. If it does not open, press PLAY in the Riot Client.`);
+        await waitForHealthyRiotSession(acc, { timeoutMs: 45000, requireDeceive: Boolean(activeConfigUrl) });
+
+        if (hasConfigBinding && configMigration) {
+          const persisted = configProfiles.verifyAppliedForTarget(acc, requestedGame);
+          if (!persisted.verified) {
+            const failedCount = persisted.mismatched || persisted.skipped || 1;
+            throw new Error(`Riot replaced or rejected ${failedCount} migrated preference file${failedCount === 1 ? '' : 's'} after the game started. The game was stopped and the migration was not reported as successful.`);
+          }
+          configMigration = {
+            ...configMigration,
+            ...persisted,
+            postLaunchVerified: true,
+            contentVerifiedAfterProductStart: true,
+          };
+          send(`Confirmed allowlisted ${GAMES[requestedGame].label} configuration contents after the game process started.`);
+        }
+      } catch (error) {
+        if (restartRequired) {
+          if (deceiveProxy) deceiveProxy.stop();
+          try { await killRiotProcesses(); } catch { /* preserve the authoritative health or launch error */ }
+        }
+        throw error;
+      }
+    }
+    const currentSession = await buildFastCurrentSessionView(alreadyActive);
+    void refreshVerifiedAccountStats(id, acc.puuid, launchVerified ? requestedGame : '')
+      .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
+    updateDiscordContext(currentSession, launchVerified ? requestedGame : '');
+    return {
+      instant: true,
+      mode: 'already-active',
+      launchedGame: launchVerified ? requestedGame : null,
+      launchRequested,
+      launcherAccepted,
+      launchVerified,
+      verified: true,
+      verification: { status: 'matched' },
+      configMigration,
+      currentSession,
+      accounts: annotate(vault.listAccounts()),
+      sessionCapture: { captured: false, reason: 'already-active' },
+    };
+  }
+
+  const configUrl = await startOfflineProxy();
 
   let result;
   try {
@@ -1078,7 +2124,7 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
       instant,
       verifyAccount: acc.puuid ? ({ phase } = {}) => verifyActiveAccount(
         acc,
-        phase === 'post-login' ? 180000 : 30000,
+        phase === 'post-login' ? 45000 : 30000,
         phase === 'post-login',
       ) : null,
       onBeforeLaunch: async (step) => {
@@ -1087,8 +2133,8 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
           try {
             session.restoreSession(userData, id, acc);
             return { instant: true };
-          } catch (error) {
-            step(`Saved session could not be restored (${error.message}) — using one clean sign-in.`);
+          } catch {
+            step('Saved session could not be restored — using one clean sign-in.');
             clearRiotSession();
             return { instant: false };
           }
@@ -1097,8 +2143,46 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
         clearRiotSession();
         return { instant: false };
       },
+      onBeforeGameLaunch: requestedGame ? async (step) => {
+        step('Waiting for the verified Riot friends session before product launch…');
+        await waitForHealthyRiotSession(acc, { timeoutMs: 30000, requireDeceive: Boolean(configUrl) });
+        if (!hasConfigBinding) return null;
+
+        step('Closing Riot processes before the offline configuration write…');
+        await killRiotProcesses();
+        await wait(1200);
+        const migrated = configProfiles.applyForTarget(acc, requestedGame);
+        const changed = Number(migrated.changed || 0);
+        const unchanged = Number(migrated.unchanged || 0);
+        const skipped = Number(migrated.skipped || 0);
+        if (skipped > 0) throw new Error(`The ${GAMES[requestedGame].label} profile had ${skipped} unmapped preference file${skipped === 1 ? '' : 's'}; launch was stopped.`);
+        step(changed
+          ? `Rewrote ${changed} allowlisted ${GAMES[requestedGame].label} preference file${changed === 1 ? '' : 's'} offline (${unchanged} already matched; backup retained). Game-start verification is pending.`
+          : `All ${unchanged} allowlisted ${GAMES[requestedGame].label} preference files already matched; no live files were rewritten. Game-start verification is pending.`);
+        return {
+          ...migrated,
+          localWriteVerified: true,
+          postLaunchVerified: false,
+          contentVerifiedAfterProductStart: false,
+        };
+      } : null,
+      onAfterGameLaunch: requestedGame ? async (migration, step) => {
+        step('Waiting for Riot friends after the game process started…');
+        await waitForHealthyRiotSession(acc, { timeoutMs: 45000, requireDeceive: Boolean(configUrl) });
+        if (!hasConfigBinding || !migration) return null;
+        const persisted = configProfiles.verifyAppliedForTarget(acc, requestedGame);
+        if (!persisted.verified) {
+          throw new Error(`Riot replaced or rejected ${persisted.mismatched || persisted.skipped || 1} migrated preference file${(persisted.mismatched || persisted.skipped || 1) === 1 ? '' : 's'} after the game started. The game was stopped and the migration was not reported as successful.`);
+        }
+        step(`Confirmed allowlisted ${GAMES[requestedGame].label} configuration contents after the game process started.`);
+        return { ...persisted, postLaunchVerified: true, contentVerifiedAfterProductStart: true };
+      } : null,
     }, send);
   } catch (error) {
+    if (error && error.code === 'PRE_GAME_LAUNCH_FAILED') {
+      if (deceiveProxy) deceiveProxy.stop();
+      try { await killRiotProcesses(); } catch { /* the original launch error remains authoritative */ }
+    }
     appendSwitchLog('FAILED', { reason: safeError(error, 'Switch failed.') });
     focusMainWindow();
     throw error;
@@ -1107,50 +2191,51 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
   let sessionCapture = { captured: false, reason: result.verified ? 'not-required' : 'account-not-verified' };
   if (result.verified === true && result.verification && result.verification.status === 'matched') {
     const live = result.verification.live;
-    const currentSession = await buildCurrentSessionView(live);
-    const rank = currentSession.stats.valorant.rank;
-    vault.patchAccount(id, {
-      riotId: currentSession.riotId || acc.riotId,
-      ...verifiedLeaguePlatformPatch(live, currentSession.stats.league),
-      level: currentSession.stats.valorant.level,
-      rankTier: rank ? rank.tier : undefined,
-      rankName: rank ? rank.tierName : undefined,
-      rr: rank ? rank.rr : undefined,
-      peakTier: rank ? rank.peakTier : undefined,
-      peakName: rank ? rank.peakTierName : undefined,
-      stats: currentSession.stats,
-      portraitSource: currentSession.portraitSource,
-      portraitId: currentSession.portraitId,
-      portraitUrl: currentSession.portraitUrl,
-      portraitWideUrl: currentSession.portraitWideUrl,
-      portraitPuuid: currentSession.portraitPuuid,
-      lastSynced: new Date().toISOString(),
-    });
+    const currentSession = await buildFastCurrentSessionView(live);
+    vault.patchAccount(id, { riotId: currentSession.riotId || acc.riotId });
     acc = vault.listAccounts().find((item) => item.id === id);
 
+    void refreshVerifiedAccountStats(id, acc.puuid, result.launchedGame || '')
+      .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
+
     if (result.loginSubmitted && result.staySignedInClicked) {
-      send('Waiting for Riot to persist the verified session…');
-      try {
-        const captured = await session.captureWhenStable(userData, id, acc, { sinceMs: result.submittedAt });
-        sessionCapture = { captured: true, reason: null, capturedAt: captured.capturedAt };
+      sessionCapture = { captured: false, reason: 'pending' };
+      const captureAccount = acc;
+      send('Account verified; persistent session capture continues in the background.');
+      void session.captureWhenStable(userData, id, captureAccount, {
+        sinceMs: result.submittedAt,
+        timeoutMs: 12000,
+        verifyIdentity: async () => {
+          const active = await settleBefore(riot.resolveChatSession(), 5000);
+          if (!exactPuuidMatch(active && active.puuid, captureAccount.puuid)) {
+            throw new Error('The active Riot identity changed before session capture.');
+          }
+          return true;
+        },
+      }).then(() => {
         send('Verified session captured for seamless switching.');
-      } catch (error) {
-        sessionCapture = { captured: false, reason: safeError(error, 'Session capture failed.') };
-        send(`Account verified; session capture was skipped (${sessionCapture.reason}).`);
-      }
+      }).catch((error) => {
+        send(`Account remained verified; background session capture was skipped (${safeError(error, 'Session capture failed.')}).`);
+      });
     }
 
+    updateDiscordContext(currentSession, result.launchedGame || '');
     result.currentSession = currentSession;
     result.accounts = annotate(vault.listAccounts());
   } else {
     result.accounts = annotate(vault.listAccounts());
   }
   result.sessionCapture = sessionCapture;
-  result.launchedGame = requestedGame;
+  result.launchedGame = result.verified === true && result.launchVerified === true
+    ? (result.launchedGame || null)
+    : null;
+  if (result.reason) result.reason = safeError(result.reason, 'Switch needs attention.');
   if (result.verification) {
     result.verification = {
       status: result.verification.status,
-      reason: result.verification.reason || undefined,
+      reason: result.verification.reason
+        ? safeError(result.verification.reason, 'Riot identity verification needs attention.')
+        : undefined,
     };
   }
 
@@ -1165,10 +2250,15 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
     inputDelivered: !!result.inputDelivered,
     manualRequired: !!result.manualRequired,
     inputCode: result.inputCode || null,
-    reason: result.reason || sessionCapture.reason || null,
+    reason: result.reason || (result.verified === true ? null : sessionCapture.reason) || null,
   });
-  if (result.manualRequired || (result.verification && result.verification.status === 'mismatched')) focusMainWindow();
-  if (settings.minimizeOnSwitch && mainWindow && result.verified === true) minimizeMainWindow();
+  if (result.manualRequired || result.credentialAttention
+    || (result.verification && result.verification.status === 'mismatched')) focusMainWindow();
+  // After a verified switch, only minimize to the taskbar. Hiding to the tray
+  // made the app appear to vanish; the window must remain easily recoverable.
+  if (settings.minimizeOnSwitch && mainWindow && result.verified === true) {
+    try { mainWindow.minimize(); } catch { /* window may be gone */ }
+  }
   return result;
 }));
 
@@ -1231,22 +2321,52 @@ handle('deceive:set-options', async (options) => {
 handle('chat:friends', async () => runChatOperation(async () => {
   requireUnlocked();
   const live = await activeChatSession();
-  const payload = await riot.fetchChatFriends();
+  const [friendsResult, presencesResult, messagesResult] = await Promise.allSettled([
+    riot.fetchChatFriends(),
+    riot.fetchChatPresences(),
+    riot.fetchChatMessages(),
+  ]);
   await verifyChatSession(live);
-  const friends = chatRows(payload, ['friends', 'data'])
-    .map(normalizeChatFriend)
+  if (friendsResult.status === 'rejected') throw friendsResult.reason;
+
+  let presences = new Map();
+  if (presencesResult.status === 'fulfilled') {
+    try { presences = activePresenceIndex(presencesResult.value); } catch { presences = new Map(); }
+  }
+  const friends = chatRows(friendsResult.value, ['friends', 'data'])
+    .map((friend) => normalizeChatFriend(friend, presences))
     .filter(Boolean)
     .sort((a, b) => {
       const onlineA = a.availability !== 'offline' ? 0 : 1;
       const onlineB = b.availability !== 'offline' ? 0 : 1;
       return onlineA - onlineB || a.riotId.localeCompare(b.riotId);
     });
+
+  let incomingMessages = [];
+  let inboxAvailable = messagesResult.status === 'fulfilled';
+  if (inboxAvailable) {
+    try {
+      const friendHandles = new Set(friends.map((friend) => friend.id));
+      incomingMessages = flattenChatMessages(messagesResult.value)
+        .map((message) => normalizeChatMessage(message, live))
+        .filter((message) => message && !message.isSelf && friendHandles.has(message.conversationId))
+        .sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')))
+        .slice(-500)
+        .map(({ id, conversationId, timestamp }) => ({ id, conversationId, timestamp }));
+    } catch {
+      inboxAvailable = false;
+      incomingMessages = [];
+    }
+  }
+
   return {
     identity: {
       riotId: live.gameName && live.tagLine ? `${live.gameName}#${live.tagLine}` : 'Current Riot account',
       puuidHash: crypto.createHash('sha256').update(String(live.puuid)).digest('hex').slice(0, 12),
     },
     friends,
+    incomingMessages,
+    inboxAvailable,
   };
 }));
 
@@ -1367,7 +2487,177 @@ handle('settings:get', async () => {
 handle('settings:set', async (patch) => {
   const settings = saveSettings(patch && typeof patch === 'object' ? patch : {});
   reconcileTray();
+  configureDiscord(settings);
+  reconcileDiscordLivePolling();
   return settings;
+});
+
+handleTrusted('startup:get', async () => getStartupState());
+handleTrusted('startup:set', async ({ enabled } = {}) => setStartupEnabled(enabled === true));
+
+handle('discord:get-state', async () => discordPresence ? discordPresence.getState() : { enabled: false, connected: false, configured: false, published: false, status: 'unavailable' });
+handle('discord:refresh', async (game) => refreshDiscordContext(Object.prototype.hasOwnProperty.call(GAMES, game) ? game : ''));
+handle('discord:test', async () => {
+  requireUnlocked();
+  if (!discordPresence) throw new Error('Discord activity service is unavailable.');
+  configureDiscord();
+  return discordPresence.testActivity();
+});
+
+handle('configs:status', async () => {
+  requireUnlocked();
+  return configProfiles.status(vault.listAccounts());
+});
+
+handle('configs:capture', async ({ accountId, game } = {}) => {
+  requireUnlocked();
+  const account = vault.listAccounts().find((item) => item.id === accountId);
+  if (!account) throw new Error('Account not found.');
+  const namespace = canonicalGame(game);
+  if (namespace === 'valorant') {
+    throw new Error('Local-file VALORANT capture is disabled. Use Capture signed-in account in the cloud migration panel.');
+  }
+  const live = await riot.resolveSession();
+  assertAccountIdentity(account, live);
+  return configProfiles.capture(account, namespace);
+});
+
+handle('configs:migrate', async ({ sourceAccountId, targetAccountId, game } = {}) => {
+  requireUnlocked();
+  const accounts = vault.listAccounts();
+  const source = accounts.find((item) => item.id === sourceAccountId);
+  const target = accounts.find((item) => item.id === targetAccountId);
+  if (!source || !target) throw new Error('Select a valid source and target account.');
+  const namespace = canonicalGame(game);
+  if (namespace === 'valorant') {
+    throw new Error('Local-file VALORANT bindings are disabled. Use the exact-PUUID cloud migration panel.');
+  }
+  if (!source.puuid || !target.puuid) throw new Error('Both accounts must be synced and PUUID-linked first.');
+  return configProfiles.migrate(source, target, namespace);
+});
+
+handle('configs:remove-binding', async ({ targetAccountId, game } = {}) => {
+  requireUnlocked();
+  const target = vault.listAccounts().find((item) => item.id === targetAccountId);
+  if (!target) throw new Error('Target account not found.');
+  return configProfiles.removeBinding(target, canonicalGame(game));
+});
+
+// Verify the requested account is the exact signed-in PUUID right now.
+async function requireActiveExactAccount(account) {
+  if (!account || !account.puuid) throw new Error('Select a synced, PUUID-linked account first.');
+  const live = await riot.resolveSession();
+  if (!live || !exactPuuidMatch(live.puuid, account.puuid)) {
+    throw new Error('This must be done while the exact account is signed in to the Riot Client. Switch to it first.');
+  }
+  return live;
+}
+
+// Capture the complete VALORANT settings for the exact signed-in account.
+handleTrusted('configs:capture-cloud', async ({ accountId } = {}) => {
+  requireUnlocked();
+  const account = vault.listAccounts().find((item) => item.id === accountId);
+  if (!account) throw new Error('Account not found.');
+  await requireActiveExactAccount(account);
+  emitConfigActivity('configs:capture-cloud', 'identity-verified');
+  const { json, path: playerPreferencesPath } = await riot.getPlayerSettings();
+  emitConfigActivity('configs:capture-cloud', 'settings-read');
+  if (!json) throw new Error('No VALORANT settings were returned. Open VALORANT once so the Riot Client loads this account’s settings, then retry.');
+  // Reading can take long enough for an account switch to occur. Never bind the
+  // returned document to a roster identity without checking the PUUID again.
+  await requireActiveExactAccount(account);
+  emitConfigActivity('configs:capture-cloud', 'identity-reverified');
+  const saved = configProfiles.saveCloudSettings(account, json, playerPreferencesPath);
+  emitConfigActivity('configs:capture-cloud', 'capture-saved');
+  return { captured: true, capturedAt: saved.capturedAt, statuses: configProfiles.status(vault.listAccounts()) };
+});
+
+// Push a captured source blob to whichever target account is signed in RIGHT NOW.
+// A durable pre-write backup and verified read-back are mandatory.
+handleTrusted('configs:apply-cloud', async ({ sourceAccountId } = {}) => {
+  requireUnlocked();
+  const accounts = vault.listAccounts();
+  // Use the explicitly chosen source. The auto-pick path remains only for
+  // backwards-compatible callers that omit a source ID entirely.
+  let source = sourceAccountId ? accounts.find((item) => item.id === sourceAccountId) : null;
+  if (sourceAccountId && !source) throw new Error('The selected source account no longer exists.');
+  let stored = source ? configProfiles.readCloudSettings(source) : null;
+  if (sourceAccountId && !stored) throw new Error('The selected source account has no valid captured cloud settings. Capture it again.');
+  if (!stored) {
+    const captured = accounts
+      .filter((item) => item.puuid)
+      .map((item) => ({ item, stored: configProfiles.readCloudSettings(item) }))
+      .filter((entry) => entry.stored)
+      .sort((a, b) => String(b.stored.capturedAt || '').localeCompare(String(a.stored.capturedAt || '')));
+    if (!captured.length) throw new Error('Capture a source account’s settings first.');
+    source = captured[0].item;
+    stored = captured[0].stored;
+  }
+
+  const live = await riot.resolveSession();
+  if (!live || !live.puuid) throw new Error('Sign in to the target account in the Riot Client first.');
+  const target = accounts.find((item) => item.puuid && exactPuuidMatch(item.puuid, live.puuid));
+  if (!target) throw new Error('The signed-in Riot account is not in your roster; add and sync it first.');
+  if (exactPuuidMatch(target.puuid, source.puuid)) throw new Error('The signed-in account is the source; sign in to a different target account.');
+  emitConfigActivity('configs:apply-cloud', 'target-identified');
+
+  // Refuse the mutation if the target cannot be read and durably backed up.
+  const current = await riot.getPlayerSettings();
+  if (!current || !current.json) {
+    throw new Error('The target account’s current VALORANT settings could not be backed up, so nothing was changed. Open VALORANT to the main menu and retry.');
+  }
+  emitConfigActivity('configs:apply-cloud', 'target-settings-read');
+  // The read may outlive the account session it began under. Recheck before
+  // attributing that document to the target or replacing its one-level backup.
+  await requireActiveExactAccount(target);
+  const backup = configProfiles.backupCloudSettings(target, current.json, current.path);
+  if (!backup || backup.backed !== true) {
+    throw new Error('The target account’s VALORANT settings backup could not be saved, so nothing was changed.');
+  }
+  emitConfigActivity('configs:apply-cloud', 'backup-retained');
+
+  // Re-verify the exact active identity immediately before the write.
+  await requireActiveExactAccount(target);
+  emitConfigActivity('configs:apply-cloud', 'identity-verified-before-write');
+  const write = await riot.savePlayerSettings(stored.blob, current.path || stored.playerPreferencesPath, {
+    onStage: (stage) => emitConfigActivity('configs:apply-cloud', stage),
+  });
+  try {
+    await requireActiveExactAccount(target);
+    emitConfigActivity('configs:apply-cloud', 'identity-reverified');
+  } catch {
+    throw new Error('The signed-in Riot identity changed during read-back verification. Settings may have been written; the target backup was retained for explicit restore.');
+  }
+  return {
+    applied: true,
+    verified: write && write.verified === true,
+    targetAccountId: target.id,
+    hadBackup: backup.backed === true,
+    note: 'Restart VALORANT to load the migrated cloud settings.',
+    statuses: configProfiles.status(vault.listAccounts()),
+  };
+});
+
+// Restore the target account's pre-migration cloud settings from backup.
+handleTrusted('configs:restore-cloud', async ({ accountId } = {}) => {
+  requireUnlocked();
+  const account = vault.listAccounts().find((item) => item.id === accountId);
+  if (!account) throw new Error('Account not found.');
+  const backup = configProfiles.readCloudBackup(account);
+  if (!backup) throw new Error('No settings backup exists for this account.');
+  emitConfigActivity('configs:restore-cloud', 'backup-loaded');
+  await requireActiveExactAccount(account);
+  emitConfigActivity('configs:restore-cloud', 'identity-verified');
+  await riot.savePlayerSettings(backup.blob, backup.playerPreferencesPath, {
+    onStage: (stage) => emitConfigActivity('configs:restore-cloud', stage),
+  });
+  try {
+    await requireActiveExactAccount(account);
+    emitConfigActivity('configs:restore-cloud', 'identity-reverified');
+  } catch {
+    throw new Error('The signed-in Riot identity changed during restore verification. The backup was retained; confirm the active account before retrying.');
+  }
+  return { restored: true, backedUpAt: backup.backedUpAt, note: 'Restart VALORANT to load the restored settings.' };
 });
 
 handle('settings:pick-client', async () => {

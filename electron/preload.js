@@ -75,6 +75,37 @@ contextBridge.exposeInMainWorld('api', {
     setOptions: (options) => invoke('deceive:set-options', options),
   },
 
+  // Opt-in Discord Rich Presence. Renderer sees only sanitized runtime state.
+  discord: {
+    getState: () => invoke('discord:get-state'),
+    refresh: (game = '') => invoke('discord:refresh', String(game || '')),
+    test: () => invoke('discord:test'),
+    onState: (callback) => {
+      if (typeof callback !== 'function') return () => {};
+      const listener = (_event, runtime) => callback(runtime);
+      ipcRenderer.on('discord:state', listener);
+      return () => ipcRenderer.removeListener('discord:state', listener);
+    },
+  },
+
+  // Identity-bound game preference profiles. No filesystem paths or PUUIDs
+  // cross this bridge.
+  configs: {
+    status: () => invoke('configs:status'),
+    capture: (accountId, game) => invoke('configs:capture', { accountId, game }),
+    migrate: (sourceAccountId, targetAccountId, game) => invoke('configs:migrate', { sourceAccountId, targetAccountId, game }),
+    captureCloud: (accountId) => invoke('configs:capture-cloud', { accountId }),
+    applyCloud: (sourceAccountId) => invoke('configs:apply-cloud', { sourceAccountId }),
+    restoreCloud: (accountId) => invoke('configs:restore-cloud', { accountId }),
+    removeBinding: (targetAccountId, game) => invoke('configs:remove-binding', { targetAccountId, game }),
+    onActivity: (callback) => {
+      if (typeof callback !== 'function') return () => {};
+      const listener = (_event, activity) => callback(activity);
+      ipcRenderer.on('configs:activity', listener);
+      return () => ipcRenderer.removeListener('configs:activity', listener);
+    },
+  },
+
   // Account-bound third-party profile links. Main resolves only identities
   // already linked to a stored PUUID and verified League platform.
   profiles: {
@@ -85,6 +116,13 @@ contextBridge.exposeInMainWorld('api', {
   session: {
     capture: (accountId, allowLink = false) => invoke('session:capture', { accountId, allowLink }),
     clear: (accountId) => invoke('session:clear', accountId),
+  },
+
+  // Packaged Windows startup registration. The main process always reads back
+  // the actual OS state; development Electron.exe is never registered.
+  startup: {
+    get: () => invoke('startup:get'),
+    set: (enabled) => invoke('startup:set', { enabled: enabled === true }),
   },
 
   // Settings + misc

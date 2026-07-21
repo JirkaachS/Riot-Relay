@@ -18,7 +18,6 @@
  * caller still launches the game normally — Deceive never blocks a switch.
  */
 
-const net = require('net');
 const tls = require('tls');
 const http = require('http');
 const https = require('https');
@@ -26,14 +25,12 @@ const fs = require('fs');
 const path = require('path');
 const { StringDecoder } = require('string_decoder');
 
-const dns = require('dns');
-
 const CONFIG_URL = 'https://clientconfig.rpg.riotgames.com';
 const GEO_PAS_URL = 'https://riot-geo.pas.si.riotgames.com/pas/v1/service/chat';
-// Deceive's publicly-trusted cert + domain. The domain resolves to 127.0.0.1,
-// and the cert is genuinely valid for it, so the Riot Client trusts our local
-// chat proxy (a self-signed cert would fail and break chat/voice/friends).
-const LOCALHOST_DOMAIN = 'deceive-localhost.molenzwiebel.xyz';
+// Advertise the hostname covered by Deceive's certificate, while binding both
+// listeners only to loopback. Proxy-to-Riot TLS remains strictly verified.
+const LOCAL_CHAT_HOST = 'deceive-localhost.molenzwiebel.xyz';
+const LOOPBACK_HOST = '127.0.0.1';
 const CERT_URL = 'https://mln.cx/deceive/localhost.pfx';
 
 // Map friendly status -> XMPP <show> value.
@@ -55,10 +52,12 @@ const xmlEscape = (value) => String(value || '')
 // against Riot's backend, so injecting this contact there would produce a blank
 // "Player" profile that cannot reliably receive messages.
 const FAKE_PUUID = '41c322a1-b328-495b-a004-5ccd3e45eae8';
-const HELPER_NAME = 'Riot Relay';
+const HELPER_NAME = 'Deceive Active!';
 const LEAGUE_HELPER_ICON = 29;
 
 const NETWORK_TIMEOUT_MS = 10000;
+const EARLY_CHAT_TIMEOUT_MS = 5000;
+const MAX_PENDING_CHATS = 4;
 const MAX_HTTP_BYTES = 5 * 1024 * 1024;
 const MAX_XML_BUFFER = 1024 * 1024;
 
@@ -107,24 +106,6 @@ async function getPfx(dir) {
   }
 }
 
-/** Verify the localhost domain resolves to 127.0.0.1 (required for the MITM). */
-function ensureResolves() {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
-      reject(new Error(`DNS lookup for ${LOCALHOST_DOMAIN} timed out.`));
-    }, NETWORK_TIMEOUT_MS);
-    dns.resolve4(LOCALHOST_DOMAIN, (err, addrs) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (!err && addrs && addrs.includes('127.0.0.1')) return resolve(true);
-      reject(new Error(`${LOCALHOST_DOMAIN} doesn't resolve to 127.0.0.1 on this network. Switch DNS to 1.1.1.1/8.8.8.8 or add a hosts entry.`));
-    });
-  });
-}
-
 class DeceiveProxy {
   constructor(dir, options = {}) {
     this.dir = dir;
@@ -140,12 +121,19 @@ class DeceiveProxy {
       // Retained as a read-only compatibility alias for existing state consumers.
       clientProduct: { value: normalizeLaunchProduct(options.launchProduct), enumerable: true },
     });
-    this.chatHost = null;
-    this.chatPort = 0;
+    this._chatRoute = null;
+    // The product whose config established the chat route. Used to enable the
+    // League helper when the proxy was started without a specific product.
+    this._latchedProduct = 'unknown';
+    Object.defineProperties(this, {
+      chatHost: { enumerable: true, get: () => this._chatRoute && this._chatRoute.host },
+      chatPort: { enumerable: true, get: () => this._chatRoute ? this._chatRoute.port : 0 },
+    });
     this.chatProxyPort = 0;
     this.configPort = 0;
     this._servers = [];
     this._connections = new Set();
+    this._pendingChats = new Map();
     this._running = false;
     this.lastError = null;
   }
@@ -183,7 +171,12 @@ class DeceiveProxy {
   }
 
   _canUseHelper(conn) {
-    return Boolean(conn && conn.product === 'league' && this.leagueHelper);
+    if (!conn || !this.leagueHelper) return false;
+    // The connection's own product wins when known. For a proxy started without
+    // a specific product (a plain account switch), fall back to the product
+    // whose config latched the chat route. VALORANT never qualifies.
+    const product = conn.product !== 'unknown' ? conn.product : this._latchedProduct;
+    return product === 'league';
   }
 
   setOptions(options = {}) {
@@ -195,11 +188,26 @@ class DeceiveProxy {
     if (typeof options.leagueHelper === 'boolean') this.leagueHelper = options.leagueHelper;
     let rewritten = 0;
     for (const conn of this._connections) {
-      if (!conn.lastPresence || !conn.outgoing || conn.outgoing.destroyed) continue;
-      try { conn.outgoing.write(Buffer.from(this._rewritePresence(conn.lastPresence), 'utf8')); rewritten += 1; }
+      try { if (this._resendPresence(conn)) rewritten += 1; }
       catch (error) { this.lastError = error.message; }
     }
     return { applied: rewritten > 0, ...this.getState() };
+  }
+
+  _resendPresence(conn) {
+    if (!conn.lastPresence || !conn.outgoing || conn.outgoing.destroyed) return false;
+    conn.outgoing.write(Buffer.from(this.enabled ? this._rewritePresence(conn.lastPresence) : conn.lastPresence, 'utf8'));
+    return true;
+  }
+
+  setEnabled(enabled) {
+    this.enabled = enabled === true;
+    let applied = 0;
+    for (const conn of this._connections) {
+      try { if (this._resendPresence(conn)) applied += 1; }
+      catch (error) { this.lastError = error.message; }
+    }
+    return { enabled: this.enabled, applied: applied > 0, ...this.getState() };
   }
 
   setStatus(status) {
@@ -209,10 +217,7 @@ class DeceiveProxy {
     for (const conn of this._connections) {
       if (!conn.incoming || conn.incoming.destroyed) continue;
       try {
-        if (conn.lastPresence && conn.outgoing && !conn.outgoing.destroyed) {
-          conn.outgoing.write(Buffer.from(this._rewritePresence(conn.lastPresence), 'utf8'));
-          applied += 1;
-        }
+        if (this._resendPresence(conn)) applied += 1;
         if (conn.insertedFake && this._canUseHelper(conn)) {
           this._writeFakePresence(conn);
           this._writeFakeMessage(
@@ -224,6 +229,15 @@ class DeceiveProxy {
       } catch (error) { this.lastError = error.message; }
     }
     return { status: this.status, applied: applied > 0, notifiedChats };
+  }
+
+  _visibleStatus() {
+    if (this.enabled) return this._word();
+    for (const conn of this._connections) {
+      const show = (conn.lastPresence && conn.lastPresence.match(/<show>([^<]+)<\/show>/i) || [])[1];
+      if (show) return show.toLowerCase() === 'chat' ? 'online' : show.toLowerCase();
+    }
+    return 'Riot-controlled';
   }
 
   getState() {
@@ -238,6 +252,7 @@ class DeceiveProxy {
       running: this._running,
       chatConnected: [...this._connections].some((conn) => conn.rosterSeen),
       status: this.status,
+      enabled: this.enabled,
       activeConnections: this._connections.size,
       connectionProducts,
       helperConnections,
@@ -254,10 +269,28 @@ class DeceiveProxy {
     };
   }
 
-  async start(status = 'offline') {
+  _listen(server, port) {
+    return new Promise((resolve, reject) => {
+      const onError = (error) => reject(error);
+      server.once('error', onError);
+      server.listen(port, LOOPBACK_HOST, () => {
+        server.removeListener('error', onError);
+        resolve();
+      });
+    });
+  }
+
+  async start(status = 'offline', options = {}) {
     this.setStatus(status);
+    // When restoring a session after a Riot Relay restart, pre-latch the known
+    // upstream route so early chat sockets forward immediately, and rebind the
+    // same local chat port the already-running game is trying to reach.
+    const restoreRoute = options.restoreRoute;
+    const restorePort = Number(options.restorePort);
+    if (restoreRoute && this._validRoute(restoreRoute.host, restoreRoute.port)) {
+      this._chatRoute = Object.freeze({ host: String(restoreRoute.host).trim(), port: restoreRoute.port });
+    }
     try {
-      await ensureResolves();               // fail fast if the domain can't reach localhost
       const pfx = await getPfx(this.dir);
 
       const chatServer = tls.createServer(
@@ -265,23 +298,26 @@ class DeceiveProxy {
         (incoming) => this._handleChat(incoming),
       );
       this._servers.push(chatServer);
-      await new Promise((resolve, reject) => {
-        const onError = (error) => reject(error);
-        chatServer.once('error', onError);
-        chatServer.listen(0, '127.0.0.1', () => {
-          chatServer.removeListener('error', onError);
-          resolve();
-        });
-      });
+      const desiredChatPort = Number.isInteger(restorePort) && restorePort > 0 && restorePort <= 65535 ? restorePort : 0;
+      try {
+        await this._listen(chatServer, desiredChatPort);
+      } catch (error) {
+        // The old port may be taken; fall back to an ephemeral one. Reconnection
+        // of an already-running game will not succeed, but a fresh launch will.
+        if (desiredChatPort === 0) throw error;
+        this.lastError = 'The previous offline chat port was unavailable; a new one was used.';
+        await this._listen(chatServer, 0);
+      }
       chatServer.on('error', (error) => { this.lastError = error.message; });
       this.chatProxyPort = chatServer.address().port;
+      if (this._chatRoute) this._persistSession();
 
       const configServer = http.createServer((req, res) => this._handleConfig(req, res));
       this._servers.push(configServer);
       await new Promise((resolve, reject) => {
         const onError = (error) => reject(error);
         configServer.once('error', onError);
-        configServer.listen(0, '127.0.0.1', () => {
+        configServer.listen(0, LOOPBACK_HOST, () => {
           configServer.removeListener('error', onError);
           resolve();
         });
@@ -300,6 +336,13 @@ class DeceiveProxy {
   }
 
   stop() {
+    for (const pending of this._pendingChats.values()) {
+      clearTimeout(pending.timer);
+      pending.incoming.removeListener('close', pending.cleanup);
+      pending.incoming.removeListener('error', pending.cleanup);
+      try { pending.incoming.destroy(); } catch { /* ignore */ }
+    }
+    this._pendingChats.clear();
     for (const conn of this._connections) {
       try { conn.incoming.destroy(); } catch { /* ignore */ }
       try { conn.outgoing.destroy(); } catch { /* ignore */ }
@@ -307,6 +350,7 @@ class DeceiveProxy {
     this._connections.clear();
     for (const s of this._servers) { try { s.close(); } catch { /* ignore */ } }
     this._servers = [];
+    this._chatRoute = null;
     this._running = false;
   }
 
@@ -314,57 +358,174 @@ class DeceiveProxy {
 
   // ---- Config proxy --------------------------------------------------------
 
+  _configProduct(url) {
+    const value = String(url || '').toLowerCase();
+    if (/(?:^|[\/_-])valorant(?:[\/_-]|$)/.test(value)) return 'valorant';
+    if (/(?:league_of_legends|league-client|league_client|(?:^|[\/_-])league(?:[\/_-]|$)|(?:^|[\/_-])lol(?:[\/_-]|$)|(?:^|[\/_-])tft(?:[\/_-]|$))/.test(value)) return 'league';
+    return 'unknown';
+  }
+
+  _isCompatibleConfig(product) {
+    return this.launchProduct === 'unknown' || product === this.launchProduct;
+  }
+
+  _validRoute(host, port) {
+    if (typeof host !== 'string' || !Number.isInteger(port) || port < 1 || port > 65535) return false;
+    const value = host.trim();
+    return value.length > 0 && value.length <= 253
+      && /^[a-z0-9.-]+$/i.test(value)
+      && !value.startsWith('.') && !value.endsWith('.') && !value.includes('..');
+  }
+
+  _sessionFile() { return path.join(this.dir, 'deceive-session.json'); }
+
+  static readPersistedSession(dir) {
+    try {
+      const value = JSON.parse(fs.readFileSync(path.join(dir, 'deceive-session.json'), 'utf8'));
+      if (!value || typeof value !== 'object') return null;
+      const port = Number(value.chatProxyPort);
+      const host = value.route && typeof value.route.host === 'string' ? value.route.host.trim() : '';
+      const routePort = value.route ? Number(value.route.port) : 0;
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+      if (!host || !Number.isInteger(routePort) || routePort <= 0 || routePort > 65535) return null;
+      return { chatProxyPort: port, route: { host, port: routePort }, launchProduct: normalizeLaunchProduct(value.launchProduct) };
+    } catch { return null; }
+  }
+
+  static clearPersistedSession(dir) {
+    try { fs.rmSync(path.join(dir, 'deceive-session.json'), { force: true }); } catch { /* ignore */ }
+  }
+
+  _persistSession() {
+    if (!this._chatRoute || !this.chatProxyPort) return;
+    try {
+      const effectiveProduct = this.launchProduct !== 'unknown' ? this.launchProduct : this._latchedProduct;
+      fs.writeFileSync(this._sessionFile(), JSON.stringify({
+        chatProxyPort: this.chatProxyPort,
+        route: { host: this._chatRoute.host, port: this._chatRoute.port },
+        launchProduct: normalizeLaunchProduct(effectiveProduct),
+        savedAt: new Date().toISOString(),
+      }));
+    } catch { /* best effort */ }
+  }
+
+  _latchRoute(host, port, product = 'unknown') {
+    if (this._chatRoute || !this._validRoute(host, port)) return false;
+    const observedProduct = normalizeLaunchProduct(product);
+    if (this.launchProduct === 'unknown' && observedProduct !== 'unknown') this._latchedProduct = observedProduct;
+    this._chatRoute = Object.freeze({ host: host.trim(), port });
+    this._persistSession();
+    const pending = [...this._pendingChats.values()];
+    this._pendingChats.clear();
+    for (const item of pending) {
+      clearTimeout(item.timer);
+      item.incoming.removeListener('close', item.cleanup);
+      item.incoming.removeListener('error', item.cleanup);
+      if (!item.incoming.destroyed) this._connectChat(item.incoming, this._chatRoute);
+    }
+    return true;
+  }
+
   _handleConfig(req, res) {
     const target = CONFIG_URL + req.url;
+    const requestProduct = this._configProduct(req.url);
+    const compatible = this._isCompatibleConfig(requestProduct);
     const headers = {};
     if (req.headers['user-agent']) headers['User-Agent'] = req.headers['user-agent'];
     if (req.headers['x-riot-entitlements-jwt']) headers['X-Riot-Entitlements-JWT'] = req.headers['x-riot-entitlements-jwt'];
     if (req.headers['authorization']) headers['Authorization'] = req.headers['authorization'];
 
     let failed = false;
-    const fail = () => {
+    const fail = (error) => {
       if (failed) return;
       failed = true;
-      try { res.writeHead(502); res.end(); } catch { /* ignore */ }
+      if (error) this.lastError = error.message;
+      const body = Buffer.from('Bad Gateway', 'utf8');
+      try {
+        res.writeHead(502, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Length': body.length,
+          Connection: 'close',
+        });
+        res.end(body);
+      } catch { /* ignore */ }
     };
     const up = https.get(target, { headers }, (upRes) => {
+      const statusCode = Number.isInteger(upRes.statusCode) ? upRes.statusCode : 0;
       const chunks = [];
       let size = 0;
       upRes.on('data', (chunk) => {
         size += chunk.length;
         if (size > MAX_HTTP_BYTES) {
           up.destroy(new Error('Config response exceeded the Riot Relay safety limit.'));
-          fail();
+          fail(new Error('Config response exceeded the Riot Relay safety limit.'));
           return;
         }
         chunks.push(chunk);
       });
       upRes.on('end', async () => {
         if (failed) return;
-        let body = Buffer.concat(chunks).toString('utf8');
-        if (upRes.statusCode >= 200 && upRes.statusCode < 300) {
+        const upstreamBody = Buffer.concat(chunks);
+        if (statusCode < 200 || statusCode >= 300) {
+          // Riot occasionally answers a config request with a transient
+          // non-success status (sometimes with a non-JSON body). Forwarding
+          // it unchanged lets the Riot Client apply its own retry behavior,
+          // exactly like upstream Deceive. Replacing it with a synthetic 502
+          // stalls the client instead of letting it recover on its own.
+          if (failed) return;
+          failed = true;
           try {
-            const cfg = JSON.parse(body);
-            // Point chat at our proxy via the trusted localhost domain (NOT a
-            // raw 127.0.0.1, so the client's TLS cert check against the domain
-            // succeeds). Remember the real host to forward to.
-            if (cfg['chat.host']) { this.chatHost = cfg['chat.host']; cfg['chat.host'] = LOCALHOST_DOMAIN; }
-            if (cfg['chat.port']) { this.chatPort = cfg['chat.port']; cfg['chat.port'] = this.chatProxyPort; }
-            if (cfg['chat.affinities']) {
-              if (cfg['chat.affinity.enabled'] && req.headers['authorization']) {
-                try {
-                  const aff = await this._affinity(req.headers['authorization']);
-                  if (aff && cfg['chat.affinities'][aff]) this.chatHost = cfg['chat.affinities'][aff];
-                } catch { /* keep fallback host */ }
-              }
-              for (const k of Object.keys(cfg['chat.affinities'])) cfg['chat.affinities'][k] = LOCALHOST_DOMAIN;
-            }
-            body = JSON.stringify(cfg);
-          } catch { /* forward as-is */ }
+            const responseHeaders = { 'Content-Length': upstreamBody.length };
+            const contentType = upRes.headers && upRes.headers['content-type'];
+            if (contentType) responseHeaders['Content-Type'] = contentType;
+            res.writeHead(statusCode || 502, responseHeaders);
+            res.end(upstreamBody);
+          } catch { /* ignore */ }
+          return;
         }
-        const buf = Buffer.from(body, 'utf8');
-        res.writeHead(upRes.statusCode || 200, { 'Content-Type': 'application/json', 'Content-Length': buf.length });
-        res.end(buf);
+        try {
+          const cfg = JSON.parse(upstreamBody.toString('utf8'));
+          if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('Client config was not a JSON object.');
+
+          const routingFields = ['chat.host', 'chat.port', 'chat.affinities', 'chat.affinity.enabled'];
+          const hasRoutingFields = routingFields.some((field) => Object.prototype.hasOwnProperty.call(cfg, field));
+          let body = upstreamBody;
+
+          if (hasRoutingFields) {
+            let routeHost = cfg['chat.host'];
+            const routePort = cfg['chat.port'];
+            const affinities = cfg['chat.affinities'];
+            if (affinities != null && (typeof affinities !== 'object' || Array.isArray(affinities))) {
+              throw new Error('Client config contained invalid chat affinities.');
+            }
+            if (cfg['chat.affinity.enabled'] && req.headers['authorization'] && affinities) {
+              try {
+                const affinity = await this._affinity(req.headers['authorization']);
+                if (Object.prototype.hasOwnProperty.call(affinities, affinity)) routeHost = affinities[affinity];
+              } catch { /* The complete fallback route remains authoritative. */ }
+            }
+
+            if (!this._validRoute(routeHost, routePort)) {
+              throw new Error('Client config did not contain a complete valid chat route.');
+            }
+            if (compatible) {
+              // Latch the observed product before persistence so a Riot Relay
+              // restart can restore League helper eligibility without waiting
+              // for another client-config request. VALORANT remains excluded.
+              this._latchRoute(routeHost, routePort, requestProduct);
+              cfg['chat.host'] = LOCAL_CHAT_HOST;
+              cfg['chat.port'] = this.chatProxyPort;
+              if (affinities) {
+                for (const key of Object.keys(affinities)) affinities[key] = LOCAL_CHAT_HOST;
+              }
+              cfg['chat.allow_bad_cert'] = true;
+              body = Buffer.from(JSON.stringify(cfg), 'utf8');
+            }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': body.length });
+          res.end(body);
+        } catch (error) { fail(error); }
       });
       upRes.on('error', fail);
     });
@@ -413,13 +574,46 @@ class DeceiveProxy {
   // ---- Chat (XMPP over TLS) proxy -----------------------------------------
 
   _handleChat(incoming) {
-    if (!this.chatHost || !this.chatPort) { incoming.destroy(); return; }
-    const outgoing = tls.connect({
-      host: this.chatHost,
-      port: this.chatPort,
-      servername: this.chatHost,
-      rejectUnauthorized: true,
-    });
+    if (this._chatRoute) {
+      this._connectChat(incoming, this._chatRoute);
+      return;
+    }
+    if (this._pendingChats.size >= MAX_PENDING_CHATS) {
+      this.lastError = 'Too many Riot chat connections arrived before routing was ready.';
+      incoming.destroy();
+      return;
+    }
+
+    const cleanup = () => {
+      const pending = this._pendingChats.get(incoming);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this._pendingChats.delete(incoming);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      this.lastError = 'Riot chat routing was not ready in time.';
+      try { incoming.destroy(); } catch { /* ignore */ }
+    }, EARLY_CHAT_TIMEOUT_MS);
+    this._pendingChats.set(incoming, { incoming, timer, cleanup });
+    incoming.once('close', cleanup);
+    incoming.once('error', cleanup);
+  }
+
+  _connectChat(incoming, route) {
+    let outgoing;
+    try {
+      outgoing = tls.connect({
+        host: route.host,
+        port: route.port,
+        servername: route.host,
+        rejectUnauthorized: true,
+      });
+    } catch (error) {
+      this.lastError = error.message;
+      incoming.destroy();
+      return;
+    }
     const conn = this._createConnection(incoming, outgoing);
     this._connections.add(conn);
     let closed = false;
@@ -503,10 +697,10 @@ class DeceiveProxy {
 
       const escapedJid = conn.fakeJid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const isHelperCommand = new RegExp(`\\bto\\s*=\\s*(['"])${escapedJid}(?:\\/[^'"]*)?\\1`, 'i').test(opening);
-      if (isHelperCommand && conn.insertedFake) {
-        // The JID is synthetic and must never be forwarded to Riot, even when
-        // the helper has just been disabled on this live connection.
-        if (this._canUseHelper(conn)) this._handleCommand(stanza, conn);
+      if (isHelperCommand && conn.product === 'league') {
+        // The JID is synthetic and must never be disclosed to or forwarded to
+        // Riot, including while the helper is disabled on a live connection.
+        if (conn.insertedFake && this._canUseHelper(conn)) this._handleCommand(stanza, conn);
       } else output += stanza;
     }
 
@@ -562,8 +756,8 @@ class DeceiveProxy {
   _scheduleHelperNotifications(conn) {
     if (!this._canUseHelper(conn)) return;
     setTimeout(() => this._writeFakePresence(conn), 400);
-    setTimeout(() => this._writeFakeMessage(conn, `${HELPER_NAME} is active — you are appearing ${this._word()} to your friends. Parties and invites remain available.`), 2500);
-    setTimeout(() => this._writeFakeMessage(conn, 'Message me "status", "online", "away", "offline" or "mobile" to change how you appear.'), 3200);
+    setTimeout(() => this._writeFakeMessage(conn, `${HELPER_NAME} is active — you are appearing ${this._visibleStatus()} to your friends.`), 2500);
+    setTimeout(() => this._writeFakeMessage(conn, 'Commands: online, offline, mobile, away, enable, disable, status, help.'), 3200);
   }
 
   _word() { return this.status === 'chat' ? 'online' : this.status; }
@@ -584,20 +778,35 @@ class DeceiveProxy {
     try { conn.incoming.write(Buffer.from(m, 'utf8')); return true; } catch { return false; }
   }
 
-  /** Handle a chat command the user typed to the League helper contact. */
+  /** Handle an exact chat command typed to the League helper contact. */
   _handleCommand(content, conn) {
     if (!this._canUseHelper(conn) || !conn.insertedFake) return false;
     const body = (content.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i) || [])[1] || '';
     const command = body.trim().toLowerCase();
-    if (command.includes('offline')) { this.setStatus('offline'); return true; }
-    if (command.includes('mobile')) { this.setStatus('mobile'); return true; }
-    if (command.includes('away')) { this.setStatus('away'); return true; }
-    if (command.includes('online')) { this.setStatus('chat'); return true; }
-
-    const reply = command.includes('status')
-      ? `You are currently appearing ${this._word()}.`
-      : 'Send "online", "away", "offline" or "mobile" to change how you appear.';
-    setTimeout(() => this._writeFakeMessage(conn, reply), 150);
+    const statuses = { online: 'chat', offline: 'offline', mobile: 'mobile', away: 'away' };
+    if (Object.prototype.hasOwnProperty.call(statuses, command)) {
+      this.enabled = true;
+      this.setStatus(statuses[command]);
+      return true;
+    }
+    if (command === 'enable') {
+      const changed = !this.enabled;
+      this.setEnabled(true);
+      this._writeFakeMessage(conn, changed ? 'Deceive is now enabled.' : 'Deceive is already enabled.');
+      return true;
+    }
+    if (command === 'disable') {
+      const changed = this.enabled;
+      this.setEnabled(false);
+      this._writeFakeMessage(conn, changed ? 'Deceive is now disabled.' : 'Deceive is already disabled.');
+      return true;
+    }
+    if (command === 'status') {
+      this._writeFakeMessage(conn, `Visible status: ${this._visibleStatus()}. Deceive is ${this.enabled ? 'enabled' : 'disabled'}.`);
+      return true;
+    }
+    const help = 'Commands: online, offline, mobile, away, enable, disable, status, help.';
+    this._writeFakeMessage(conn, command === 'help' ? help : `Unknown command. ${help}`);
     return true;
   }
 

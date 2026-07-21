@@ -10,7 +10,6 @@ const SCHEMA_VERSION = 1;
 const MANIFEST_FILE = 'manifest.json';
 const LOCAL = path.join(os.homedir(), 'AppData', 'Local', 'Riot Games');
 const RIOT_DATA = path.join(LOCAL, 'Riot Client', 'Data');
-const RIOT_CONFIG = path.join(LOCAL, 'Riot Client', 'Config');
 const LOL_DATA = path.join(LOCAL, 'League of Legends', 'Data');
 const SETTINGS_FILE = 'RiotGamesPrivateSettings.yaml';
 
@@ -31,23 +30,6 @@ function unavailable(reason, detail = '') {
   return { available: false, identityVerified: false, reason, detail, capturedAt: null };
 }
 
-function copyDir(src, dest, skip = () => false, bestEffort = false) {
-  if (!fs.existsSync(src)) return 0;
-  fs.mkdirSync(dest, { recursive: true });
-  let count = 0;
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (skip(entry.name)) continue;
-    const source = path.join(src, entry.name);
-    const target = path.join(dest, entry.name);
-    try {
-      if (entry.isDirectory()) count += copyDir(source, target, skip, bestEffort);
-      else { fs.copyFileSync(source, target); count += 1; }
-    } catch (error) {
-      if (!bestEffort) throw error;
-    }
-  }
-  return count;
-}
 /** Validate integrity, machine compatibility, and account binding without restoring. */
 function validateSession(userData, id, account) {
   const dir = accountDir(userData, id);
@@ -115,7 +97,6 @@ function captureSession(userData, id, account) {
   try {
     const savedSettings = path.join(tempDir, SETTINGS_FILE);
     fs.copyFileSync(primary, savedSettings);
-    const configCount = copyDir(RIOT_CONFIG, path.join(tempDir, 'Config'), (name) => name.toLowerCase() === 'lockfile', true);
     const stat = fs.statSync(savedSettings);
     const manifest = {
       schemaVersion: SCHEMA_VERSION,
@@ -125,7 +106,6 @@ function captureSession(userData, id, account) {
       compatibility: compatibilityMarker(),
       artifacts: [
         { name: SETTINGS_FILE, path: SETTINGS_FILE, required: true, size: stat.size, sha256: sha256(savedSettings) },
-        { name: 'Config', path: 'Config', required: false, fileCount: configCount },
       ],
     };
     fs.writeFileSync(path.join(tempDir, MANIFEST_FILE), JSON.stringify(manifest, null, 2));
@@ -154,38 +134,71 @@ function restoreSession(userData, id, account) {
     fs.mkdirSync(target, { recursive: true });
     fs.copyFileSync(savedSettings, path.join(target, SETTINGS_FILE));
   }
-  copyDir(path.join(dir, 'Config'), RIOT_CONFIG, (name) => name.toLowerCase() === 'lockfile', true);
   return { ok: true, status };
 }
 
 /**
  * Wait until Riot has written a new, durable private-settings file, then
  * capture it. A login can verify before Chromium flushes its persistent token;
- * sampling size + mtime prevents saving the pre-login or half-written file.
+ * sampling a content hash prevents saving the pre-login or half-written file,
+ * including same-sized rewrites with coarse filesystem timestamp granularity.
  */
 async function captureWhenStable(userData, id, account, options = {}) {
   const sinceMs = Number(options.sinceMs || 0);
-  const timeoutMs = Number(options.timeoutMs || 30000);
-  const sampleMs = Number(options.sampleMs || 750);
-  const requiredStableSamples = Number(options.stableSamples || 3);
+  const timeoutMs = Math.max(1, Number(options.timeoutMs || 12000));
+  const sampleMs = Math.max(1, Number(options.sampleMs || 400));
+  const requiredStableSamples = Math.max(1, Number(options.stableSamples || 2));
+  const verifyIdentity = typeof options.verifyIdentity === 'function' ? options.verifyIdentity : null;
+  const settingsPath = path.join(RIOT_DATA, SETTINGS_FILE);
   const deadline = Date.now() + timeoutMs;
   let previous = null;
   let stable = 0;
 
   while (Date.now() < deadline) {
+    let readyToCapture = false;
     try {
-      const stat = fs.statSync(path.join(RIOT_DATA, SETTINGS_FILE));
-      const current = `${stat.size}:${stat.mtimeMs}`;
-      const isFresh = stat.size > 0 && (!sinceMs || stat.mtimeMs >= sinceMs - 1000);
-      if (isFresh && current === previous) stable += 1;
-      else stable = isFresh ? 1 : 0;
+      const stat = fs.statSync(settingsPath);
+      const isFresh = stat.isFile() && stat.size > 0 && (!sinceMs || stat.mtimeMs >= sinceMs - 1000);
+      // Riot can rewrite this file without changing its size or observable mtime
+      // granularity. Hashing each bounded sample prevents capturing between two
+      // same-sized writes while allowing a stable file to settle in one interval.
+      const current = isFresh ? `${stat.size}:${stat.mtimeMs}:${sha256(settingsPath)}` : null;
+      if (current && current === previous) stable += 1;
+      else stable = current ? 1 : 0;
       previous = current;
-      if (stable >= requiredStableSamples) return captureSession(userData, id, account);
+      readyToCapture = stable >= requiredStableSamples;
     } catch {
       previous = null;
       stable = 0;
     }
-    await new Promise((resolve) => setTimeout(resolve, sampleMs));
+
+    if (readyToCapture) {
+      if (verifyIdentity) {
+        const remaining = Math.max(1, deadline - Date.now());
+        let timer = null;
+        let verified;
+        try {
+          verified = await Promise.race([
+            Promise.resolve().then(() => verifyIdentity()),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Identity verification timed out.')), remaining);
+            }),
+          ]);
+        } catch {
+          throw new Error('The active Riot identity could not be reverified before session capture; the previous snapshot was kept.');
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+        if (verified === false) {
+          throw new Error('The active Riot identity changed before session capture; the previous snapshot was kept.');
+        }
+      }
+      // No asynchronous work may occur between the optional identity decision and commit.
+      return captureSession(userData, id, account);
+    }
+
+    const waitMs = Math.min(sampleMs, Math.max(0, deadline - Date.now()));
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
   throw new Error('Riot verified the account, but its persistent session file was not updated and stable before the capture timeout.');
 }

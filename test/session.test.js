@@ -76,6 +76,30 @@ test('recapture atomically replaces the old snapshot only after validation', () 
   assert.deepEqual(leftovers, []);
 });
 
+test('captureWhenStable preserves the prior snapshot when final identity verification fails', async () => {
+  const saved = path.join(userData, 'sessions', accountA.id, 'RiotGamesPrivateSettings.yaml');
+  const previousSnapshot = fs.readFileSync(saved, 'utf8');
+  fs.writeFileSync(liveFile, 'session: UNVERIFIED_REPLACEMENT');
+  let verificationCalls = 0;
+
+  await assert.rejects(
+    session.captureWhenStable(userData, accountA.id, accountA, {
+      timeoutMs: 250,
+      sampleMs: 5,
+      stableSamples: 2,
+      verifyIdentity: async () => {
+        verificationCalls += 1;
+        return false;
+      },
+    }),
+    /identity changed/i,
+  );
+
+  assert.equal(verificationCalls, 1);
+  assert.equal(fs.readFileSync(saved, 'utf8'), previousSnapshot);
+  assert.equal(session.validateSession(userData, accountA.id, accountA).available, true);
+});
+
 test('remove clears the complete snapshot', () => {
   session.removeSession(userData, accountA.id);
   assert.equal(session.validateSession(userData, accountA.id, accountA).reason, 'missing');
