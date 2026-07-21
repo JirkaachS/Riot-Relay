@@ -34,7 +34,6 @@ const { DeceiveProxy } = require('./deceive');
 const session = require('./session');
 const { assertAccountIdentity, findRosterMatches } = require('./account-identity');
 const { UpdateService } = require('./updater');
-const { DiscordPresenceService } = require('./discord-presence');
 const { ConfigProfiles, canonicalGame } = require('./config-profiles');
 
 const APP_NAME = 'Riot Relay';
@@ -101,14 +100,7 @@ let riot = null;
 let catalog = null;
 let deceiveProxy = null;
 let updateService = null;
-let discordPresence = null;
 let configProfiles = null;
-let discordContext = null;
-let discordVerifiedPuuid = null;
-let discordRankByGame = {};
-let discordLiveTimer = null;
-let discordLiveGeneration = 0;
-let discordLiveInFlight = false;
 const chatHandleSecret = crypto.randomBytes(32);
 const chatHandles = new Map();
 const chatLabels = new Map();
@@ -134,22 +126,6 @@ const DEFAULT_SETTINGS = {
   deceiveActivityMode: 'hide', // preserve | hide | generic
   deceiveCustomStatus: '',
   deceiveLeagueHelper: true,
-  discordPresenceEnabled: false,
-  discordClientId: '',
-  discordShowGame: true,
-  discordShowRank: false,
-  discordShowRiotId: false,
-  discordShowStatus: false,
-  discordShowElapsed: true,
-  discordShowLiveMatch: false,
-  discordShowMatchMode: false,
-  discordShowMatchMap: false,
-  discordShowMatchPhase: false,
-  discordShowMatchScore: false,
-  discordShowMatchElapsed: false,
-  discordCustomDetails: '',
-  discordCustomState: '',
-  discordLargeImage: '',
   hideLoginNames: false,
   hideDisplayNames: false,
   featureTutorialVersion: 0,
@@ -223,32 +199,6 @@ function setStartupEnabled(enabled) {
     throw new Error(`Windows did not ${requested ? 'enable' : 'disable'} startup registration.`);
   }
   return actual;
-}
-
-function discordOptions(settings = loadSettings()) {
-  return {
-    enabled: settings.discordPresenceEnabled === true,
-    clientId: settings.discordClientId,
-    showGame: settings.discordShowGame !== false,
-    showRank: settings.discordShowRank === true,
-    showRiotId: settings.discordShowRiotId === true,
-    showStatus: settings.discordShowStatus === true,
-    showElapsed: settings.discordShowElapsed !== false,
-    showLiveMatch: settings.discordShowLiveMatch === true,
-    showMatchMode: settings.discordShowMatchMode === true,
-    showMatchMap: settings.discordShowMatchMap === true,
-    showMatchPhase: settings.discordShowMatchPhase === true,
-    showMatchScore: settings.discordShowMatchScore === true,
-    showMatchElapsed: settings.discordShowMatchElapsed === true,
-    customDetails: settings.discordCustomDetails,
-    customState: settings.discordCustomState,
-    largeImage: settings.discordLargeImage,
-    hideDisplayNames: settings.hideDisplayNames === true,
-  };
-}
-
-function configureDiscord(settings = loadSettings()) {
-  return discordPresence ? discordPresence.configure(discordOptions(settings)) : null;
 }
 
 const CONTENT_TYPES = {
@@ -395,6 +345,10 @@ function minimizeMainWindow() {
 }
 
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    focusMainWindow();
+    return mainWindow;
+  }
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -445,6 +399,12 @@ function createWindow() {
       hideMainWindowToTray({ notify: true });
     }
   });
+  mainWindow.on('close', (event) => {
+    if (!isQuitting && trayEnabled()) {
+      event.preventDefault();
+      hideMainWindowToTray({ notify: true });
+    }
+  });
   mainWindow.on('maximize', () => mainWindow.webContents.send('window:state', { maximized: true }));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window:state', { maximized: false }));
   mainWindow.on('closed', () => (mainWindow = null));
@@ -459,7 +419,10 @@ if (!gotSingleInstanceLock) app.quit();
 
 app.on('second-instance', () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    if (gotSingleInstanceLock) createWindow();
+    // A second launch can arrive while the asynchronous renderer server is
+    // still starting. The primary startup path will create the window once a
+    // valid origin exists; never create an invalid or duplicate window here.
+    if (gotSingleInstanceLock && rendererOrigin) createWindow();
     return;
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -474,12 +437,6 @@ app.whenReady().then(async () => {
   riot = new RiotClient();
   catalog = new Catalog(dir);
   configProfiles = new ConfigProfiles(dir);
-  discordPresence = new DiscordPresenceService({
-    onState: (discordState) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('discord:state', discordState);
-    },
-  });
-  configureDiscord();
 
   await startRendererServer();
   createWindow();
@@ -524,10 +481,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
-  stopDiscordLivePolling(false);
   if (updateService) updateService.dispose();
-  if (discordPresence) discordPresence.dispose();
-  discordPresence = null;
   if (trayNotificationWatchdog) clearTimeout(trayNotificationWatchdog);
   trayNotificationWatchdog = null;
   if (trayNotification) trayNotification.close();
@@ -540,7 +494,12 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform === 'darwin') return;
+  if (!isQuitting && trayEnabled()) {
+    reconcileTray();
+    return;
+  }
+  app.quit();
 });
 
 // ---- IPC helpers -----------------------------------------------------------
@@ -707,11 +666,6 @@ async function runChatOperation(operation) {
 async function runAccountSwitch(operation) {
   if (accountSwitchInProgress) throw new Error('Another account switch is already in progress.');
   accountSwitchInProgress = true;
-  stopDiscordLivePolling(true);
-  discordVerifiedPuuid = null;
-  discordRankByGame = {};
-  discordContext = null;
-  if (discordPresence) discordPresence.setContext(null);
   invalidateChatSession();
   if (activeChatOperations > 0) await new Promise((resolve) => chatIdleWaiters.push(resolve));
   try { return await operation(); }
@@ -1472,137 +1426,7 @@ async function refreshVerifiedAccountStats(accountId, expectedPuuid, game = '') 
     portraitPuuid: currentSession.portraitPuuid,
     lastSynced: new Date().toISOString(),
   });
-  updateDiscordContext(currentSession, game);
   return true;
-}
-
-function rankForDiscord(view, game) {
-  const stats = view && view.stats || {};
-  if (game === 'valorant') {
-    const rank = stats.valorant && stats.valorant.rank;
-    return rank && (rank.tierName || rank.name) ? `${rank.tierName || rank.name}${Number.isFinite(rank.rr) ? ` · ${rank.rr} RR` : ''}` : '';
-  }
-  const queues = game === 'tft' ? stats.tft && stats.tft.queues : stats.league && stats.league.queues;
-  const queue = Array.isArray(queues) ? queues.find((item) => item && (item.tier || item.rank)) : null;
-  return queue ? [queue.tier, queue.rank, Number.isFinite(queue.leaguePoints) ? `${queue.leaguePoints} LP` : ''].filter(Boolean).join(' ') : '';
-}
-
-function discordLiveEnabled(settings = loadSettings()) {
-  return settings.discordPresenceEnabled === true && settings.discordShowLiveMatch === true && !!String(settings.discordClientId || '').trim();
-}
-
-function clearDiscordLiveContext() {
-  if (!discordContext || !discordContext.live) return;
-  discordContext = { ...discordContext, live: null };
-  if (discordPresence) discordPresence.setContext(discordContext);
-}
-
-function stopDiscordLivePolling(clearLive = true) {
-  discordLiveGeneration += 1;
-  if (discordLiveTimer) clearInterval(discordLiveTimer);
-  discordLiveTimer = null;
-  discordLiveInFlight = false;
-  if (clearLive) clearDiscordLiveContext();
-}
-
-function liveActivityPriority(value) {
-  const phase = String(value && value.phaseCode || '').toLowerCase();
-  if (phase === 'ingame' || phase === 'inprogress') return 5;
-  if (phase === 'pregame' || phase === 'champselect' || phase === 'gamestart') return 4;
-  if (phase === 'matchmaking' || phase === 'readycheck') return 3;
-  return value ? 1 : 0;
-}
-
-async function pollDiscordLiveActivity() {
-  if (discordLiveInFlight || accountSwitchInProgress || !discordVerifiedPuuid || !vault || !vault.isUnlocked() || !discordLiveEnabled()) return;
-  const generation = discordLiveGeneration;
-  const expectedPuuid = discordVerifiedPuuid;
-  discordLiveInFlight = true;
-  try {
-    const liveSession = await riot.resolveSession();
-    if (generation !== discordLiveGeneration || !sameIdentity(liveSession.puuid, expectedPuuid)) throw new Error('identity-changed');
-    const rosterMatch = vault.listAccounts().some((account) => sameIdentity(account.puuid, expectedPuuid));
-    if (!rosterMatch) throw new Error('identity-unlinked');
-    const settings = loadSettings();
-    const [valorantResult, leagueResult] = await Promise.allSettled([
-      riot.fetchValorantLive(liveSession),
-      league.fetchLiveSession(settings.leaguePath, expectedPuuid),
-    ]);
-    const verified = await riot.resolveChatSession();
-    if (generation !== discordLiveGeneration || accountSwitchInProgress || !sameIdentity(verified.puuid, expectedPuuid)) throw new Error('identity-changed');
-    const candidates = [
-      valorantResult.status === 'fulfilled' ? valorantResult.value : null,
-      leagueResult.status === 'fulfilled' ? leagueResult.value : null,
-    ].filter(Boolean).sort((a, b) => liveActivityPriority(b) - liveActivityPriority(a));
-    const live = candidates[0] || null;
-    if (!discordContext) return;
-    const selected = live && live.product && GAMES[live.product] ? live.product : live && live.product;
-    discordContext = {
-      ...discordContext,
-      game: live && live.game || discordContext.game,
-      rank: selected && discordRankByGame[selected] || discordContext.rank,
-      live,
-    };
-    if (discordPresence) discordPresence.setContext(discordContext);
-  } catch (error) {
-    if (generation !== discordLiveGeneration) return;
-    if (/identity-(?:changed|unlinked)/.test(String(error && error.message))) {
-      discordVerifiedPuuid = null;
-      discordRankByGame = {};
-      discordContext = null;
-      if (discordPresence) discordPresence.setContext(null);
-      stopDiscordLivePolling(false);
-    } else clearDiscordLiveContext();
-  } finally {
-    if (generation === discordLiveGeneration) discordLiveInFlight = false;
-  }
-}
-
-function reconcileDiscordLivePolling() {
-  if (!discordLiveEnabled() || !discordVerifiedPuuid || !vault || !vault.isUnlocked()) {
-    stopDiscordLivePolling(true);
-    return;
-  }
-  if (discordLiveTimer) return;
-  discordLiveGeneration += 1;
-  pollDiscordLiveActivity();
-  discordLiveTimer = setInterval(pollDiscordLiveActivity, 12000);
-  if (typeof discordLiveTimer.unref === 'function') discordLiveTimer.unref();
-}
-
-function updateDiscordContext(view, game = '') {
-  const settings = loadSettings();
-  const verified = view && view.puuid && Array.isArray(view.matchingAccountIds) && view.matchingAccountIds.length > 0;
-  if (!verified) {
-    discordVerifiedPuuid = null;
-    discordRankByGame = {};
-    discordContext = null;
-    if (discordPresence) discordPresence.setContext(null);
-    stopDiscordLivePolling(false);
-    return discordPresence ? discordPresence.getState() : { enabled: false, connected: false };
-  }
-  const selected = game && GAMES[game] ? game : '';
-  discordVerifiedPuuid = view.puuid;
-  discordRankByGame = {
-    valorant: rankForDiscord(view, 'valorant'), league: rankForDiscord(view, 'lol'),
-    lol: rankForDiscord(view, 'lol'), tft: rankForDiscord(view, 'tft'),
-  };
-  discordContext = {
-    game: selected ? GAMES[selected].label : 'Riot Relay',
-    rank: selected ? discordRankByGame[selected] : '',
-    riotId: settings.hideDisplayNames ? '' : view.riotId,
-    status: settings.useDeceive ? (settings.deceiveStatus === 'chat' ? 'Online' : String(settings.deceiveStatus || 'Offline')) : 'Signed in',
-    live: null,
-  };
-  if (discordPresence) discordPresence.setContext(discordContext);
-  reconcileDiscordLivePolling();
-  return discordPresence ? discordPresence.getState() : { enabled: false, connected: false };
-}
-
-async function refreshDiscordContext(game = '') {
-  requireUnlocked();
-  const view = await buildCurrentSessionView();
-  return updateDiscordContext(view, game);
 }
 
 /** Poll until the target identity is matched or a stable outcome is known. */
@@ -1782,14 +1606,12 @@ handle('vault:hello-options', async (purpose) => {
 handle('vault:create', async ({ masterPassword }) => {
   if (!masterPassword || masterPassword.length < 4) throw new Error('Master password must be at least 4 characters.');
   vault.create(masterPassword);
-  if (discordPresence) discordPresence.setAvailable(true);
   return annotate(vault.listAccounts());
 });
 
 handle('vault:unlock', async ({ masterPassword }) => {
   try { vault.unlock(masterPassword); }
   catch { throw new Error('Incorrect master password or the vault could not be opened.'); }
-  if (discordPresence) discordPresence.setAvailable(true);
   return annotate(vault.listAccounts());
 });
 
@@ -1799,19 +1621,10 @@ handle('vault:unlock-parked', async (assertion = null) => {
   if (mode === 'hello') webauthn.finishAuthentication(assertion, credential);
   try { vault.unlockWithParkedKey(mode, credential); }
   catch { throw new Error('The stored key is invalid, unavailable, or not enabled for this vault.'); }
-  if (discordPresence) discordPresence.setAvailable(true);
   return annotate(vault.listAccounts());
 });
 
 handle('vault:lock', async () => {
-  stopDiscordLivePolling(false);
-  discordVerifiedPuuid = null;
-  discordRankByGame = {};
-  if (discordPresence) {
-    discordPresence.setContext(null);
-    discordPresence.setAvailable(false);
-  }
-  discordContext = null;
   vault.lock();
   return true;
 });
@@ -1898,11 +1711,7 @@ handle('session:clear', async (accountId) => {
 
 handle('riot:is-running', async () => riot.isRunning());
 
-handle('riot:current-session', async () => {
-  const view = await buildFastCurrentSessionView();
-  updateDiscordContext(view);
-  return view;
-});
+handle('riot:current-session', async () => buildFastCurrentSessionView());
 
 handle('riot:all-stats', async () => {
   const live = await riot.resolveSession();
@@ -2093,7 +1902,6 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
     const currentSession = await buildFastCurrentSessionView(alreadyActive);
     void refreshVerifiedAccountStats(id, acc.puuid, launchVerified ? requestedGame : '')
       .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
-    updateDiscordContext(currentSession, launchVerified ? requestedGame : '');
     return {
       instant: true,
       mode: 'already-active',
@@ -2219,7 +2027,6 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
       });
     }
 
-    updateDiscordContext(currentSession, result.launchedGame || '');
     result.currentSession = currentSession;
     result.accounts = annotate(vault.listAccounts());
   } else {
@@ -2487,22 +2294,11 @@ handle('settings:get', async () => {
 handle('settings:set', async (patch) => {
   const settings = saveSettings(patch && typeof patch === 'object' ? patch : {});
   reconcileTray();
-  configureDiscord(settings);
-  reconcileDiscordLivePolling();
   return settings;
 });
 
 handleTrusted('startup:get', async () => getStartupState());
 handleTrusted('startup:set', async ({ enabled } = {}) => setStartupEnabled(enabled === true));
-
-handle('discord:get-state', async () => discordPresence ? discordPresence.getState() : { enabled: false, connected: false, configured: false, published: false, status: 'unavailable' });
-handle('discord:refresh', async (game) => refreshDiscordContext(Object.prototype.hasOwnProperty.call(GAMES, game) ? game : ''));
-handle('discord:test', async () => {
-  requireUnlocked();
-  if (!discordPresence) throw new Error('Discord activity service is unavailable.');
-  configureDiscord();
-  return discordPresence.testActivity();
-});
 
 handle('configs:status', async () => {
   requireUnlocked();

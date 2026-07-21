@@ -109,7 +109,6 @@
       <div class="side__list">
         <button class="settingnav is-active" data-group="client">Riot Client</button>
         <button class="settingnav" data-group="deceive">Deceive</button>
-        <button class="settingnav" data-group="discord">Discord activity</button>
         <button class="settingnav" data-group="configs">Config migration</button>
         <button class="settingnav" data-group="privacy">Privacy</button>
         <button class="settingnav" data-group="security">Security</button>
@@ -306,68 +305,21 @@
             <p class="deceive-error" id="deceive-last-error" hidden></p>
           </div>
 
-          <div class="panel setting-group discord-panel" data-group="discord">
-            <div class="feature-panel-head">
-              <div><h3>Discord activity <span class="badge badge--accent">opt in</span></h3><p class="hint">Publishes a customizable Rich Presence through the local Discord desktop pipe. It never sends login names, PUUIDs, tokens, sessions, or credentials.</p></div>
-              <div class="deceive-runtime" id="discord-runtime"><i class="dot dot--off"></i><span>Disabled</span></div>
-            </div>
-            <label class="toggle toggle--stacked">
-              <input type="checkbox" id="set-discord-enabled" />
-              <span class="toggle__track"><span class="toggle__thumb"></span></span>
-              <span><b>Enable Discord Rich Presence</b><small>Disabled by default. Activity is cleared when the vault locks or this option is turned off.</small></span>
-            </label>
-            <div class="field">
-              <label for="set-discord-client-id">Discord Application ID</label>
-              <input id="set-discord-client-id" type="text" inputmode="numeric" maxlength="20" placeholder="17–20 digit application ID" />
-              <p class="hint">Riot Relay only needs the public Application ID from an application you control in the Discord Developer Portal. No client secret, bot token, or Discord login is needed. Riot Relay cannot create that developer application on your behalf.</p>
-            </div>
-            <div class="feature-grid">
-              <label class="toggle"><input type="checkbox" id="set-discord-game" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Active game</span></label>
-              <label class="toggle"><input type="checkbox" id="set-discord-rank" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Verified rank</span></label>
-              <label class="toggle"><input type="checkbox" id="set-discord-riot-id" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Riot ID</span></label>
-              <label class="toggle"><input type="checkbox" id="set-discord-status" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Presence status</span></label>
-              <label class="toggle"><input type="checkbox" id="set-discord-elapsed" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>App elapsed time</span></label>
-            </div>
-            <section class="live-match-options" aria-labelledby="discord-live-title">
-              <label class="toggle toggle--stacked">
-                <input type="checkbox" id="set-discord-live" />
-                <span class="toggle__track"><span class="toggle__thumb"></span></span>
-                <span><b id="discord-live-title">Show current match</b><small>Polls only the verified active PUUID. Unknown fields are omitted; player names, match IDs, party IDs, and opponents are never published.</small></span>
-              </label>
-              <div class="feature-grid" id="discord-live-fields">
-                <label class="toggle"><input type="checkbox" id="set-discord-match-mode" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Mode / queue</span></label>
-                <label class="toggle"><input type="checkbox" id="set-discord-match-map" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Map</span></label>
-                <label class="toggle"><input type="checkbox" id="set-discord-match-phase" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Match phase</span></label>
-                <label class="toggle"><input type="checkbox" id="set-discord-match-score" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Score when available</span></label>
-                <label class="toggle"><input type="checkbox" id="set-discord-match-elapsed" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Match elapsed time</span></label>
-              </div>
-              <p class="hint">VALORANT supports queue, map, phase, and relative round score from the current player’s presence. League supports gameflow, queue, map, phase, match time, and the verified active player’s K/D/A; TFT omits fields that are unavailable.</p>
-            </section>
-            <div class="feature-grid feature-grid--fields">
-              <div class="field"><label for="set-discord-details">Custom details</label><input id="set-discord-details" maxlength="128" placeholder="Overrides the game line" /></div>
-              <div class="field"><label for="set-discord-state">Custom state</label><input id="set-discord-state" maxlength="128" placeholder="Overrides rank/status/ID" /></div>
-              <div class="field"><label for="set-discord-image">Large image asset key</label><input id="set-discord-image" maxlength="32" placeholder="Optional uploaded asset key" /></div>
-            </div>
-            <div class="feature-preview" id="discord-preview">Riot Relay activity preview</div>
-            <div class="discord-diagnostics" id="discord-diagnostics" aria-live="polite">Save an Application ID to begin the Discord handshake.</div>
-            <div class="settings-actions"><button class="btn btn--primary" id="btn-discord-save" type="button">Save and refresh</button><button class="btn btn--ghost" id="btn-discord-refresh" type="button">Refresh from Riot</button><button class="btn btn--ghost" id="btn-discord-test" type="button">Test minimal activity</button></div>
-          </div>
-
           <div class="panel setting-group config-panel" data-group="configs">
             <div class="feature-panel-head">
               <div>
-                <h3>VALORANT settings migration</h3>
-                <p class="hint">Copy the <code>Ares.PlayerSettings</code> document returned by Riot Client from one account to another, guarded by exact PUUID checks.</p>
+                <h3>Game settings migration</h3>
+                <p class="hint">Migrate allowlisted local League/TFT or Runeterra preferences between verified accounts, or use the separate exact-PUUID VALORANT cloud workflow.</p>
               </div>
-              <span class="badge badge--accent">cloud</span>
+              <span class="badge badge--accent">identity-bound</span>
             </div>
 
-            <div class="config-workflow" id="config-workflow" hidden>
+            <div class="config-workflow" id="config-workflow">
               <section class="config-step" id="config-step-source">
                 <header><span class="config-step__number">1</span><div><strong>Capture the source</strong><small id="config-source-status">Not captured</small></div></header>
-                <p>Choose the game and account whose preferences you want.</p>
+                <p>Choose the local game profile and sign into the account whose preferences you want to copy.</p>
                 <div class="config-step__fields">
-                  <div class="field"><label for="config-game">Game profile</label><select id="config-game" class="select"><option value="valorant">VALORANT</option><option value="lol">League of Legends / TFT</option><option value="lor">Legends of Runeterra</option></select></div>
+                  <div class="field"><label for="config-game">Local game profile</label><select id="config-game" class="select"><option value="lol">League of Legends</option><option value="tft">Teamfight Tactics</option><option value="lor">Legends of Runeterra</option></select></div>
                   <div class="field"><label for="config-source">Source account</label><div class="config-account-picker"><select id="config-source" class="select"></select><button class="btn btn--ghost config-use-current" id="btn-config-source-current" type="button">Use signed-in account</button></div></div>
                 </div>
                 <button class="btn btn--ghost" id="btn-config-capture-source" type="button">Capture verified source</button>
@@ -375,7 +327,7 @@
 
               <section class="config-step" id="config-step-target">
                 <header><span class="config-step__number">2</span><div><strong>Capture the target baseline</strong><small id="config-target-status">Waiting for step 1</small></div></header>
-                <p>Select a different account and capture its current baseline. VALORANT can use its validated PUUID-owned Riot folder without launching; other games still require the target account to be active.</p>
+                <p>Sign into a different target account, then capture its current local baseline before enabling migration.</p>
                 <div class="field"><label for="config-target">Target account</label><div class="config-account-picker"><select id="config-target" class="select"></select><button class="btn btn--ghost config-use-current" id="btn-config-target-current" type="button">Use signed-in account</button></div></div>
                 <button class="btn btn--ghost" id="btn-config-capture-target" type="button">Capture verified target</button>
               </section>
@@ -384,9 +336,9 @@
                 <header><span class="config-step__number">3</span><div><strong>Review and enable</strong><small id="config-review-status">Complete steps 1 and 2</small></div></header>
                 <div class="config-route" id="config-profile-status">Select a source and target to review the route.</div>
                 <ul class="config-safety-list">
-                  <li>A binding does not write files. Use Apply and launch target; Riot Relay first verifies the target PUUID, then writes locally, verifies hashes, and launches the game.</li>
-                  <li>Manual launches outside Riot Relay are not intercepted. Local verification cannot guarantee Riot cloud settings will not overwrite a file later.</li>
-                  <li>A target backup is retained for changed files. VALORANT’s local folder must also be uniquely attributable when captured.</li>
+                  <li>League and TFT share one allowlisted League profile, but Apply launches the game selected above. Runeterra uses preference-like registry values only.</li>
+                  <li>A binding does not write anything. Apply verifies the target PUUID, stops Riot processes, creates a transactional backup, verifies the local write, launches the selected game, and verifies again.</li>
+                  <li>Captured local profiles and transactional backups are plaintext outside the encrypted password vault. Manual launches are not intercepted.</li>
                 </ul>
                 <div class="config-application" id="config-application-status">No local application attempt recorded.</div>
                 <div class="settings-actions">

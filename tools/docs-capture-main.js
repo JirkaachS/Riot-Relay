@@ -89,14 +89,14 @@ app.whenReady().then(async () => {
 
   await capture(window, 'settings-migration.png', `(async () => {
     await api.configs.setActiveTarget();
-    document.querySelector('#btn-sync-current').click();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    state.currentSession = unwrap(await api.riot.currentSession());
+    state.stats = unwrap(await api.riot.allStats());
+    await refreshAccounts();
     document.querySelector('[data-view="settings"]').click();
     document.querySelector('.settingnav[data-group="configs"]').click();
     await api.configs.applyCloud('demo-primary');
     await refreshConfigProfiles();
-    renderConfigProfileStatus();
-  })()`, `document.querySelector('.setting-group[data-group="configs"].is-active') && Number(document.querySelector('#activity-count').textContent) >= 8 && !document.querySelector('#btn-cloud-restore').disabled`);
+  })()`, `document.querySelector('.setting-group[data-group="configs"].is-active')`);
 
   window.destroy();
   app.quit();

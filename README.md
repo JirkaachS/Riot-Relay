@@ -1,6 +1,6 @@
 # Riot Relay
 
-Riot Relay is a Windows account command center for Riot games: encrypted credentials, PUUID-bound sessions, deliberate switching, unified stats and inventories, current-session chat, privacy controls, and verified VALORANT settings migration.
+Riot Relay is a Windows account command center for Riot games: encrypted credentials, PUUID-bound sessions, deliberate switching, unified stats and inventories, current-session chat, privacy controls, local League/TFT/Runeterra profile migration, and validated VALORANT cloud-settings migration.
 
 **Version 1.3.3** · [Documentation](https://jirkaachs.github.io/Riot-Relay/) · [Latest release](https://github.com/JirkaachS/Riot-Relay/releases/latest) · [Release notes](.github/release-notes/v1.3.3.md) · [Security](https://jirkaachs.github.io/Riot-Relay/security.html) · [Privacy](https://jirkaachs.github.io/Riot-Relay/privacy.html)
 
@@ -21,12 +21,23 @@ These screenshots are generated from Riot Relay’s actual renderer with a captu
 - Encrypted local credential vault with optional Windows-protected unlock modes.
 - Exact-PUUID session verification before switch success is reported.
 - VALORANT, League, and TFT rank synchronization; inventory, wallet, export, chat, profile, and privacy tools.
-- Optional Discord Rich Presence with independent disclosure controls.
 - Built-in presence proxy informed by [Deceive](https://github.com/molenzwiebel/Deceive), including a League-only helper that is never exposed to VALORANT.
 - Default switching does not launch a game; game launch is always explicit.
 - Riot OTP and 2FA challenges remain manual in the official Riot Client.
 
-## VALORANT settings migration
+## Game settings migration
+
+Riot Relay provides two deliberately separate migration paths:
+
+- **League of Legends / Teamfight Tactics (local):** captures the four allowlisted files `Config/PersistedSettings.json`, `Config/game.cfg`, `Config/input.ini`, and `Config/LeagueClientSettings.yaml`. League and TFT share this profile; Apply launches whichever game was selected.
+- **Legends of Runeterra (local):** captures only allowlisted preference-like values under `HKCU\Software\Riot Games\Legends of Runeterra`. Credential, session, account, login, token, and PUUID-like values are excluded.
+- **VALORANT (Riot Client cloud):** uses the validated `Ares.PlayerSettings` workflow described below; local-file VALORANT migration remains disabled.
+
+Local capture requires the exact selected PUUID to be signed in. Saving a binding performs no write. Apply verifies the target identity, stops Riot processes, creates transactional rollback data, writes and verifies only allowlisted preferences, launches the selected game, and verifies the result again. Manual game launches are not intercepted.
+
+Local profiles and transactional backups are plaintext files outside the encrypted password vault. Existing legacy VALORANT-local data is retained but is never applied.
+
+## VALORANT cloud settings migration
 
 Riot Relay can Capture the `Ares.PlayerSettings` data document returned by the running Riot Client, Apply it to a different signed-in account, and Restore the target’s latest pre-Apply backup.
 
