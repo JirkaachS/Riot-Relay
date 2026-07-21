@@ -21,6 +21,10 @@ const { spawn, execFile } = require('child_process');
 
 const RIOT_PROCESSES = [
   'RiotClientServices', 'RiotClientUx', 'RiotClientUxRender', 'RiotClientCrashHandler',
+  // Riot's newer Chromium shell runs as "Riot Client.exe". If it survives,
+  // the relaunch only signals that stale process and it keeps its in-memory
+  // signed-out state instead of loading the restored session file.
+  'Riot Client', 'RiotClientElectron',
   'VALORANT', 'VALORANT-Win64-Shipping',
   'LeagueClient', 'LeagueClientUx', 'LeagueClientUxRender', 'League of Legends',
   'LoR', 'LegendsOfRuneterra',
@@ -70,9 +74,23 @@ const SESSION_FILE = 'RiotGamesPrivateSettings.yaml';
 
 function clearRiotSession() {
   let removed = 0;
+  let removalFailed = false;
   for (const dir of [RIOT_DATA_DIR, LOL_DATA_DIR]) {
     const file = path.join(dir, SESSION_FILE);
-    try { if (fs.existsSync(file)) { fs.unlinkSync(file); removed += 1; } } catch { /* locked/ignore */ }
+    try {
+      if (fs.existsSync(file)) {
+        fs.unlinkSync(file);
+        removed += 1;
+      }
+    } catch {
+      removalFailed = true;
+    }
+    // Never launch with ambiguous auth state. A locked file means a Riot
+    // process survived and could override the account selected by the caller.
+    if (fs.existsSync(file)) removalFailed = true;
+  }
+  if (removalFailed) {
+    throw new Error('Riot session data was still locked, so the account switch was stopped safely. Close Riot Client and retry.');
   }
   return removed;
 }
@@ -271,8 +289,8 @@ async function launchProduct(clientPath, { game, configUrl = '' } = {}) {
  * The SendKeys automation focuses the window, fills the username field,
  * tabs to the password field, fills it, and presses Enter.
  */
-async function autoLogin(username, password, onDiagnostic = () => {}) {
-  const stdin = JSON.stringify({ u: username, p: password });
+async function autoLogin(username, password, clientPath, onDiagnostic = () => {}) {
+  const stdin = JSON.stringify({ u: username, p: password, r: path.dirname(clientPath) });
 
   // Riot's Chromium controls are not reliably exposed through UI Automation.
   // Select the largest visible RiotClientUx window, explicitly click each field,
@@ -406,24 +424,60 @@ async function autoLogin(username, password, onDiagnostic = () => {}) {
 "@
 
     [NativeInput]::SetProcessDPIAware() | Out-Null
+    function Get-TrustedRiotPids {
+      $root = [IO.Path]::GetFullPath([string]$creds.r).TrimEnd([char]92) + [char]92
+      [uint32[]]@(
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+          Where-Object {
+            $name = ([string]$_.Name).ToLowerInvariant()
+            $exe = [string]$_.ExecutablePath
+            $allowedName = $name -eq 'riotclientux.exe' -or $name -eq 'riot client.exe'
+            $allowedName -and $exe -and $exe.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+          } |
+          ForEach-Object { [uint32]$_.ProcessId }
+      )
+    }
+
+    function Test-LoginControls([IntPtr]$handle) {
+      try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction SilentlyContinue
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+        if ($null -eq $root) { return $false }
+        $condition = [System.Windows.Automation.PropertyCondition]::new(
+          [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+          [System.Windows.Automation.ControlType]::Edit
+        )
+        $edits = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+        return $null -ne $edits -and $edits.Count -ge 2
+      } catch { return $false }
+    }
+
+    function Assert-TrustedRiotWindow([IntPtr]$handle) {
+      [uint32[]]$pids = @(Get-TrustedRiotPids)
+      $pid = [NativeInput]::ProcessId($handle)
+      if ($handle -eq [IntPtr]::Zero -or -not ($pids -contains $pid)) {
+        throw 'LOGIN_WINDOW_CHANGED: the trusted Riot login window closed or was replaced'
+      }
+    }
+
     $h = [IntPtr]::Zero
     $stable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
     for ($i = 0; $i -lt 80; $i++) {
-      # Include every Riot-owned process; renderer/window executable names have
-      # changed across Riot Client releases.
-      [uint32[]]$pids = @(Get-Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.ProcessName -like 'Riot*' } |
-        ForEach-Object { [uint32]$_.Id })
+      # Only accept Riot Chromium executables beneath the same installation
+      # root as RiotClientServices. This excludes Riot Relay and unrelated
+      # windows whose process names merely begin with "Riot".
+      [uint32[]]$pids = @(Get-TrustedRiotPids)
       $candidate = [NativeInput]::FindRiotWindow($pids)
       if ($candidate -ne [IntPtr]::Zero) {
         $width = [NativeInput]::ClientWidth($candidate); $height = [NativeInput]::ClientHeight($candidate)
         if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) { $stable++ } else { $stable = 0 }
         $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
-        if ($stable -ge 2) { $h = $candidate; break }
+        if ($stable -ge 4) { $h = $candidate; break }
       }
       Start-Sleep -Milliseconds 500
     }
-    if ($h -eq [IntPtr]::Zero) { throw 'WINDOW_NOT_FOUND: no stable visible Riot login window appeared' }
+    if ($h -eq [IntPtr]::Zero) { throw 'WINDOW_NOT_FOUND: no stable trusted Riot login window appeared' }
     [pscustomobject]@{
       checkpoint = 'WINDOW_SELECTED'
       processId = [NativeInput]::ProcessId($h)
@@ -432,20 +486,36 @@ async function autoLogin(username, password, onDiagnostic = () => {}) {
       height = [NativeInput]::ClientHeight($h)
     } | ConvertTo-Json -Compress | Write-Output
 
-    # A stable top-level HWND appears before Riot's Chromium form is hydrated.
-    # Let the sign-in UI finish rendering, then reacquire the current Riot HWND
-    # once in case Chromium replaced it during startup.
-    Start-Sleep -Milliseconds 4500
-    [uint32[]]$readyPids = @(Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.ProcessName -like 'Riot*' } |
-      ForEach-Object { [uint32]$_.Id })
-    $readyWindow = [NativeInput]::FindRiotWindow($readyPids)
-    if ($readyWindow -ne [IntPtr]::Zero) { $h = $readyWindow }
+    # A top-level Chromium HWND appears before its form. Prefer the actual UIA
+    # edit-control signal when Riot exposes it; otherwise require the trusted
+    # window to remain unchanged for a conservative twelve-second hydration
+    # period. A fixed short sleep entered credentials into a blank splash view
+    # on slower production machines.
+    $formReady = $false; $readyStable = 0; $readySince = [DateTime]::UtcNow
+    $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
+    for ($i = 0; $i -lt 60; $i++) {
+      [uint32[]]$readyPids = @(Get-TrustedRiotPids)
+      $candidate = [NativeInput]::FindRiotWindow($readyPids)
+      if ($candidate -ne [IntPtr]::Zero) {
+        $width = [NativeInput]::ClientWidth($candidate); $height = [NativeInput]::ClientHeight($candidate)
+        if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) { $readyStable++ } else { $readyStable = 0 }
+        $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
+        $elapsed = ([DateTime]::UtcNow - $readySince).TotalMilliseconds
+        if ((Test-LoginControls $candidate) -or ($elapsed -ge 12000 -and $readyStable -ge 8)) {
+          $h = $candidate; $formReady = $true; break
+        }
+      }
+      Start-Sleep -Milliseconds 500
+    }
+    if (-not $formReady) { throw 'FORM_NOT_READY: Riot opened a window but its login form did not become ready' }
+    Assert-TrustedRiotWindow $h
     Write-Output '{"checkpoint":"FORM_SETTLE_WAIT_COMPLETE"}'
 
+    Assert-TrustedRiotWindow $h
     if (-not [NativeInput]::Activate($h)) { throw 'FOREGROUND_DENIED: Windows would not give focus to the ready Riot login window' }
     Write-Output '{"checkpoint":"FOREGROUND_ACQUIRED"}'
 
+    Assert-TrustedRiotWindow $h
     if ([NativeInput]::ClickClient($h, 0.13, 0.295) -ne 2) { throw 'USERNAME_CLICK_FAILED: could not target the username field' }
     Start-Sleep -Milliseconds 250
     if ([NativeInput]::SelectAll() -ne 4) { throw 'USERNAME_SELECT_FAILED: native input was blocked' }
@@ -453,9 +523,10 @@ async function autoLogin(username, password, onDiagnostic = () => {}) {
     if ([NativeInput]::SendUnicode([string]$creds.u) -ne $expected) { throw 'USERNAME_INPUT_FAILED: Windows blocked native username input' }
     Write-Output '{"checkpoint":"USERNAME_INPUT_INJECTED"}'
 
-    # Explicit mouse clicks target each field. Do not reacquire foreground here:
-    # Chromium may swap its top-level HWND while retaining the visible form.
+    # Revalidate ownership before each sensitive input stage. Chromium may
+    # replace its HWND while hydrating; never continue typing into another app.
     Start-Sleep -Milliseconds 300
+    Assert-TrustedRiotWindow $h
     if ([NativeInput]::ClickClient($h, 0.13, 0.37) -ne 2) { throw 'PASSWORD_CLICK_FAILED: could not target the password field' }
     Start-Sleep -Milliseconds 250
     if ([NativeInput]::SelectAll() -ne 4) { throw 'PASSWORD_SELECT_FAILED: native input was blocked' }
@@ -467,9 +538,11 @@ async function autoLogin(username, password, onDiagnostic = () => {}) {
     # unchecked. Request persistence before submitting and click the form's
     # arrow button directly so checkbox focus cannot consume an Enter key.
     Start-Sleep -Milliseconds 300
+    Assert-TrustedRiotWindow $h
     if ([NativeInput]::ClickClient($h, 0.042, 0.495) -ne 2) { throw 'STAY_SIGNED_IN_FAILED: could not target the Stay signed in checkbox' }
     Write-Output '{"checkpoint":"STAY_SIGNED_IN_CLICKED"}'
     Start-Sleep -Milliseconds 300
+    Assert-TrustedRiotWindow $h
     if ([NativeInput]::ClickClient($h, 0.13, 0.75) -ne 2) { throw 'SUBMIT_FAILED: could not target the sign-in button' }
     Write-Output '{"checkpoint":"SUBMIT_CLICKED"}'
 
@@ -516,6 +589,7 @@ async function switchAccount({
   onBeforeLaunch = null,
   onBeforeGameLaunch = null,
   onAfterGameLaunch = null,
+  onRestoredSessionRejected = null,
   verifyAccount = null,
 }, onStep = () => {}) {
   const progressSink = typeof onStep === 'function' ? onStep : () => {};
@@ -651,6 +725,12 @@ async function switchAccount({
         reason: 'Riot did not expose a stable identity before the verification timeout.',
       };
     }
+    // A stable wrong identity or repeated explicit 401/404 response means Riot
+    // rejected this snapshot. Remove it before any credential fallback so it is
+    // not advertised as a working saved session on the next launch.
+    if (typeof onRestoredSessionRejected === 'function') {
+      await onRestoredSessionRejected(restoredVerification, onStep);
+    }
     if (loginMode !== 'native-required') {
       onStep('The saved session needs sign-in and automatic login is disabled.');
       return {
@@ -699,7 +779,7 @@ async function switchAccount({
 
   onStep('Waiting for and targeting the Riot login form…');
   try {
-    const input = await autoLogin(username, password, (event) => {
+    const input = await autoLogin(username, password, client, (event) => {
       const labels = {
         HELPER_STARTED: 'Secure login helper started.',
         WINDOW_SELECTED: 'Riot login window is ready.',

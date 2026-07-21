@@ -50,7 +50,7 @@ class Vault {
     this.safeStorage = safeStorage;
     this.key = null;               // Buffer(32) once unlocked
     this.salt = null;              // Buffer(16)
-    this.data = { accounts: [] };  // decrypted in-memory model
+    this.data = { accounts: [], rosterSections: [] };  // decrypted in-memory model
   }
 
   exists() {
@@ -93,6 +93,7 @@ class Vault {
     this.key = this._deriveKey(masterPassword, this.salt);
     this.data = {
       accounts: [],
+      rosterSections: [],
       capabilities: { osKeyMode: 'disabled' },
       createdAt: new Date().toISOString(),
     };
@@ -122,9 +123,35 @@ class Vault {
 
   _normalizedData(value) {
     const data = value && typeof value === 'object' ? value : {};
+    if (!Array.isArray(data.rosterSections)) data.rosterSections = [];
+    const seenSectionIds = new Set();
+    const seenSectionNames = new Set();
+    data.rosterSections = data.rosterSections.flatMap((section, index) => {
+      if (!section || typeof section !== 'object') return [];
+      const id = String(section.id || '').trim();
+      const name = String(section.name || '').trim().slice(0, 64);
+      const nameKey = name.toLocaleLowerCase();
+      if (!/^[0-9a-f-]{36}$/i.test(id) || !name || seenSectionIds.has(id) || seenSectionNames.has(nameKey)) return [];
+      seenSectionIds.add(id);
+      seenSectionNames.add(nameKey);
+      return [{
+        id,
+        name,
+        order: Number.isFinite(Number(section.order)) ? Number(section.order) : index,
+        rosterHidden: section.rosterHidden === true,
+        createdAt: section.createdAt || null,
+        updatedAt: section.updatedAt || null,
+      }];
+    }).sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+    const validSectionIds = new Set(data.rosterSections.map((section) => section.id));
     if (!Array.isArray(data.accounts)) data.accounts = [];
     data.accounts = data.accounts.map((account) => account && typeof account === 'object'
-      ? { ...account, stats: sanitizeStats(account.stats) }
+      ? {
+        ...account,
+        sectionId: validSectionIds.has(String(account.sectionId || '')) ? String(account.sectionId) : null,
+        rosterHidden: account.rosterHidden === true,
+        stats: sanitizeStats(account.stats),
+      }
       : account);
     if (!data.capabilities || typeof data.capabilities !== 'object') data.capabilities = {};
     const legacyMode = data.capabilities.osKeyStorage === true ? 'os' : 'disabled';
@@ -354,7 +381,7 @@ class Vault {
     if (Buffer.isBuffer(this.key)) this.key.fill(0);
     this.key = null;
     this.salt = null;
-    this.data = { accounts: [] };
+    this.data = { accounts: [], rosterSections: [] };
   }
 
   _persist() {
@@ -377,6 +404,11 @@ class Vault {
   }
 
   upsertAccount(account) {
+    const requestedSectionId = String(account && account.sectionId || '');
+    const sectionId = this.data.rosterSections.some((section) => section.id === requestedSectionId)
+      ? requestedSectionId
+      : null;
+    account = { ...account, sectionId };
     const now = new Date().toISOString();
     const idx = this.data.accounts.findIndex((a) => a.id === account.id);
     if (idx >= 0) {
@@ -418,6 +450,87 @@ class Vault {
     this.data.accounts[idx] = { ...this.data.accounts[idx], ...safePatch, updatedAt: new Date().toISOString() };
     this._persist();
     return this.listAccounts();
+  }
+
+  // ---- Encrypted roster organization ---------------------------------------
+
+  listRosterSections() {
+    return (this.data.rosterSections || []).map((section) => ({ ...section }));
+  }
+
+  _rosterSectionName(value, excludingId = null) {
+    const name = String(value || '').trim().replace(/\s+/g, ' ').slice(0, 64);
+    if (!name) throw new Error('Section name is required.');
+    const duplicate = this.data.rosterSections.some((section) => section.id !== excludingId
+      && section.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+    if (duplicate) throw new Error('A roster section with that name already exists.');
+    return name;
+  }
+
+  createRosterSection(name) {
+    const now = new Date().toISOString();
+    const section = {
+      id: crypto.randomUUID(),
+      name: this._rosterSectionName(name),
+      order: this.data.rosterSections.length,
+      rosterHidden: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.data.rosterSections.push(section);
+    this._persist();
+    return section;
+  }
+
+  renameRosterSection(id, name) {
+    const section = this.data.rosterSections.find((item) => item.id === id);
+    if (!section) throw new Error('Roster section not found.');
+    section.name = this._rosterSectionName(name, id);
+    section.updatedAt = new Date().toISOString();
+    this._persist();
+  }
+
+  removeRosterSection(id) {
+    if (!this.data.rosterSections.some((section) => section.id === id)) throw new Error('Roster section not found.');
+    this.data.rosterSections = this.data.rosterSections.filter((section) => section.id !== id);
+    const now = new Date().toISOString();
+    this.data.accounts = this.data.accounts.map((account) => account.sectionId === id
+      ? { ...account, sectionId: null, updatedAt: now }
+      : account);
+    this._persist();
+  }
+
+  setRosterSectionHidden(id, hidden) {
+    const section = this.data.rosterSections.find((item) => item.id === id);
+    if (!section) throw new Error('Roster section not found.');
+    section.rosterHidden = hidden === true;
+    section.updatedAt = new Date().toISOString();
+    this._persist();
+  }
+
+  setAccountRosterHidden(id, hidden) {
+    const account = this.data.accounts.find((item) => item.id === id);
+    if (!account) throw new Error('Account not found.');
+    account.rosterHidden = hidden === true;
+    account.updatedAt = new Date().toISOString();
+    this._persist();
+  }
+
+  showAllRosterItems() {
+    const now = new Date().toISOString();
+    this.data.rosterSections.forEach((section) => {
+      if (section.rosterHidden) {
+        section.rosterHidden = false;
+        section.updatedAt = now;
+      }
+    });
+    this.data.accounts.forEach((account) => {
+      if (account.rosterHidden) {
+        account.rosterHidden = false;
+        account.updatedAt = now;
+      }
+    });
+    this._persist();
   }
 
   changeMasterPassword(newPassword) {

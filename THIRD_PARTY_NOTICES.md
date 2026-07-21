@@ -33,11 +33,9 @@ Riot's developer assets and publishes the mirror under the Unlicense. Riot Relay
 pins the archive revision and provides a generated fallback when an image is
 unavailable.
 
-Because that pre-Emerald archive has no Emerald tier, `renderer/emerald-rank.png`
-is a local 512 × 585 adaptation generated from Riot's current Emerald emblem as
-distributed by [CommunityDragon](https://raw.communitydragon.org/). Its transparent
-canvas and visible footprint were normalized to match the archived emblem set;
-the underlying artwork remains property of Riot Games.
+Because that pre-Emerald archive has no Emerald tier, `renderer/emerald-rank.jfif`
+is the custom Emerald artwork supplied by the project maintainer. It is stored
+locally and used only for the Emerald tier fallback.
 
 ## Product disclaimer
 

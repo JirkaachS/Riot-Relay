@@ -51,11 +51,19 @@
     <aside class="side" id="side-accounts">
       <div class="side__head">
         <span class="side__title">Roster</span>
-        <button class="side__add" id="btn-add" title="Add account"><span data-icon="plus" data-size="16"></span></button>
+        <div class="roster-head-actions">
+          <button class="roster-head-btn" id="btn-hidden-roster" type="button" title="Show hidden roster items" aria-expanded="false" hidden><span data-icon="eye-off" data-size="13"></span><span id="hidden-roster-count">0</span></button>
+          <button class="roster-head-btn" id="btn-section-add" type="button" title="Create roster section"><span data-icon="plus" data-size="13"></span> Section</button>
+          <button class="side__add" id="btn-add" title="Add account" aria-label="Add account"><span data-icon="plus" data-size="16"></span></button>
+        </div>
       </div>
       <div class="search side__search">
         <span class="ic" data-icon="search" data-size="14"></span>
         <input id="account-search" type="text" placeholder="Search" aria-label="Search accounts" />
+      </div>
+      <div class="roster-hidden" id="roster-hidden" hidden>
+        <div class="roster-hidden__head"><strong>Hidden</strong><button type="button" id="btn-show-all-roster">Show all</button></div>
+        <div id="roster-hidden-list"></div>
       </div>
       <div class="side__list" id="account-list"></div>
     </aside>
@@ -383,6 +391,11 @@
               <span class="toggle__track"><span class="toggle__thumb"></span></span>
               <span><b>Hide account display names</b><small>Masks your Riot ID in the app and removes it from filenames, JSON, and image headers.</small></span>
             </label>
+            <label class="toggle">
+              <input type="checkbox" id="set-rank-borders" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Show roster rank borders</b><small>Frames each roster account with its highest-priority rank: VALORANT, then League, then TFT.</small></span>
+            </label>
           </div>
 
           <div class="panel setting-group" data-group="security">
@@ -493,6 +506,11 @@
         <div class="field">
           <label for="acc-label">Display label</label>
           <input id="acc-label" type="text" placeholder="e.g. Main / Smurf / EU" />
+        </div>
+        <div class="field">
+          <label for="acc-section">Roster section</label>
+          <select id="acc-section"><option value="">No section</option></select>
+          <p class="hint">Accounts can stay outside every section and be moved later.</p>
         </div>
         <div class="field">
           <label for="acc-username">Riot username (for login)</label>

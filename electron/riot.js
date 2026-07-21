@@ -411,7 +411,10 @@ class RiotClient {
       ent = await request(`${base}/entitlements/v1/token`, { headers: H, agent: localAgent });
     } catch (error) {
       if (error && (error.statusCode === 401 || error.statusCode === 404)) {
-        throw new Error('No active Riot session. Open Riot Client and sign in, then try again.');
+        const unavailable = new Error('No active Riot session. Open Riot Client and sign in, then try again.');
+        unavailable.code = 'RIOT_NOT_AUTHENTICATED';
+        unavailable.statusCode = error.statusCode;
+        throw unavailable;
       }
       throw error;
     }

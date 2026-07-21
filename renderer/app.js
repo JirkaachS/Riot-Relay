@@ -27,6 +27,7 @@ function orderedTypes(byType) {
 
 const state = {
   accounts: [],
+  rosterSections: [],
   selectedAccountId: null,
   currentSession: null,
   stats: null,
@@ -853,7 +854,7 @@ $('#lock-parked').addEventListener('click', async () => {
 });
 $('#btn-lock').addEventListener('click', async () => {
   await api.vault.lock();
-  state.accounts = []; state.selectedAccountId = null;
+  state.accounts = []; state.rosterSections = []; state.selectedAccountId = null;
   clearChatState();
   renderAccounts(); renderDetail();
   await bootVault();
@@ -944,7 +945,7 @@ const LEAGUE_RANK_COLORS = {
 };
 const LEAGUE_EMBLEM_TIERS = new Set(['Iron', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Emerald', 'Diamond', 'Master', 'Grandmaster', 'Challenger']);
 const LEAGUE_EMBLEM_BASE = 'https://cdn.jsdelivr.net/gh/magisteriis/lol-icons-and-emblems@9168d1e/ranked-emblems';
-const LEAGUE_EMERALD_ASSET = './emerald-rank.png';
+const LEAGUE_EMERALD_ASSET = './emerald-rank.jfif';
 function gameMark(game) {
   const paths = {
     valorant: '<path d="M3 4l10.2 18h5.1l-4.6-7.9L8.4 6.8 3 4Zm26 0L18.7 22h5.2l5.1-8.2V4Z"/>',
@@ -1125,40 +1126,65 @@ function bindPortraits(root = document) {
   }));
 }
 async function refreshAccounts() {
-  try { state.accounts = unwrap(await api.accounts.list()); } catch { state.accounts = []; }
+  try {
+    const roster = unwrap(await api.roster.get());
+    state.accounts = Array.isArray(roster.accounts) ? roster.accounts : [];
+    state.rosterSections = Array.isArray(roster.sections) ? roster.sections : [];
+  } catch {
+    state.accounts = [];
+    state.rosterSections = [];
+  }
   await refreshConfigProfiles();
 }
 const ROSTER_RANK_SCORES = {
   league: { IRON: 100, BRONZE: 200, SILVER: 300, GOLD: 400, PLATINUM: 500, EMERALD: 600, DIAMOND: 700, MASTER: 800, GRANDMASTER: 950, CHALLENGER: 1000 },
   valorant: { IRON: 100, BRONZE: 200, SILVER: 300, GOLD: 400, PLATINUM: 500, DIAMOND: 650, ASCENDANT: 725, IMMORTAL: 825, RADIANT: 925 },
 };
+const VALORANT_RANK_COLORS = {
+  IRON: '#7f7774', BRONZE: '#a86e4b', SILVER: '#9aa8b7', GOLD: '#d4ac56', PLATINUM: '#57c4bd',
+  DIAMOND: '#9c76d8', ASCENDANT: '#4db06d', IMMORTAL: '#d35b70', RADIANT: '#e6c36d',
+};
 function normalizedRosterTier(value) {
   return String(value || '').trim().toUpperCase().replace(/\s+[123]$/, '');
 }
-function bestRosterRank(account) {
-  const stats = statsFor(account);
+function bestQueueRank(game, gameId) {
   const candidates = [];
-  const valorant = stats.valorant && stats.valorant.rank;
-  const valorantTier = normalizedRosterTier(valorant && (valorant.tierName || valorant.name));
-  if (valorant && ROSTER_RANK_SCORES.valorant[valorantTier] && hasRankedValorantEvidence(valorant)) {
-    candidates.push({
-      game: 'valorant', score: ROSTER_RANK_SCORES.valorant[valorantTier] * 10000 + (Number(valorant.tier) || 0),
-      tier: valorant.tier, tierName: String(valorant.tierName || valorant.name),
-      label: `${valorant.tierName || valorant.name}${valorant.rr != null ? ` · ${fmt(valorant.rr)} RR` : ''}`,
-    });
-  }
-  const league = stats.league || {};
-  for (const queue of Array.isArray(league.queues) ? league.queues : []) {
+  for (const queue of Array.isArray(game && game.queues) ? game.queues : []) {
     const tierName = normalizedRosterTier(queue && (queue.tier || queue.tierName));
     if (!queue || !ROSTER_RANK_SCORES.league[tierName]) continue;
-    const divisionScore = { IV: 1, III: 2, II: 3, I: 4 }[String(queue.division || '').toUpperCase()] || 0;
+    const division = String(queue.division || '').toUpperCase();
+    const divisionScore = { IV: 1, III: 2, II: 3, I: 4 }[division] || 0;
     candidates.push({
-      game: 'league', score: ROSTER_RANK_SCORES.league[tierName] * 10000 + divisionScore * 100 + (Number(queue.lp) || 0),
-      tierName, division: String(queue.division || '').toUpperCase(), queue: queue.queue,
-      label: `${tierName} ${String(queue.division || '').toUpperCase()}${queue.lp != null ? ` · ${fmt(queue.lp)} LP` : ''}`.replace(/\s+/g, ' ').trim(),
+      game: gameId,
+      score: ROSTER_RANK_SCORES.league[tierName] * 10000 + divisionScore * 100 + (Number(queue.lp) || 0),
+      tierName,
+      division,
+      queue: queue.queue,
+      accent: LEAGUE_RANK_COLORS[tierName] || LEAGUE_RANK_COLORS.UNRANKED,
+      label: `${tierName} ${division}${queue.lp != null ? ` · ${fmt(queue.lp)} LP` : ''}`.replace(/\s+/g, ' ').trim(),
     });
   }
   return candidates.sort((left, right) => right.score - left.score)[0] || null;
+}
+function bestRosterRank(account) {
+  const stats = statsFor(account);
+  const valorant = stats.valorant && stats.valorant.rank;
+  const valorantTier = normalizedRosterTier(valorant && (valorant.tierName || valorant.name));
+  if (valorant && ROSTER_RANK_SCORES.valorant[valorantTier] && hasRankedValorantEvidence(valorant)) {
+    return {
+      game: 'valorant',
+      tier: valorant.tier,
+      tierName: String(valorant.tierName || valorant.name),
+      accent: VALORANT_RANK_COLORS[valorantTier] || '#a7a7b2',
+      label: `${valorant.tierName || valorant.name}${valorant.rr != null ? ` · ${fmt(valorant.rr)} RR` : ''}`,
+    };
+  }
+  // Product priority is deliberate: any current League rank wins over TFT,
+  // regardless of tier. TFT is used only when the other two have no rank.
+  return bestQueueRank(stats.league, 'league') || bestQueueRank(stats.tft, 'tft');
+}
+function rosterGameLabel(game) {
+  return game === 'valorant' ? 'VALORANT' : game === 'league' ? 'League of Legends' : 'Teamfight Tactics';
 }
 function accountRow(a, signedIn = false) {
   const bestRank = bestRosterRank(a);
@@ -1167,35 +1193,100 @@ function accountRow(a, signedIn = false) {
   const active = a.id === state.selectedAccountId ? ' is-active' : '';
   const favorite = a.favorite ? ' is-favorite' : '';
   const current = signedIn ? ' is-signed-in' : '';
+  const border = bestRank && state.settings.showRosterRankBorders !== false ? ' has-rank-border' : '';
   const rankArtwork = bestRank
-    ? (bestRank.game === 'league' ? rankEmblem(bestRank.tierName, 'league', 'arow__rank') : rankIcon(bestRank.tier, 'arow__rank'))
+    ? (bestRank.game === 'valorant'
+      ? rankIcon(bestRank.tier, 'arow__rank')
+      : rankEmblem(bestRank.tierName, bestRank.game, 'arow__rank'))
     : '';
+  const rankStyle = border ? ` style="--roster-rank-accent:${escapeHtml(bestRank.accent)}"` : '';
   return `
-    <div class="arow${active}${favorite}${current}" data-select="${a.id}">
+    <div class="arow${active}${favorite}${current}${border}" data-select="${a.id}"${rankStyle}>
       ${portraitMarkup(a, 'arow__av')}
       <div class="arow__meta">
         <div class="arow__label"><span>${escapeHtml(a.label || 'Unnamed')}</span>${signedIn ? '<span class="arow__live" title="Currently signed in" aria-label="Currently signed in">SIGNED IN</span>' : ''}${a.hasSession ? `<span class="arow__bolt" title="Identity-verified saved session">${ic('zap', 11)}</span>` : ''}</div>
         <div class="arow__sub">${escapeHtml(sub)}</div>
       </div>
       <button class="arow__favorite${a.favorite ? ' is-active' : ''}" data-row-fav="${a.id}" title="${a.favorite ? 'Remove from favorites' : 'Add to favorites'}" aria-label="${a.favorite ? 'Remove from favorites' : 'Add to favorites'}">${ic('star', 14, { fill: !!a.favorite })}</button>
-      <div class="arow__rankslot" title="${bestRank ? escapeHtml(`${bestRank.game === 'league' ? 'League of Legends' : 'VALORANT'} · ${bestRank.label}`) : ''}">${rankArtwork}</div>
+      <div class="arow__rankslot" title="${bestRank ? escapeHtml(`${rosterGameLabel(bestRank.game)} · ${bestRank.label}`) : ''}">${rankArtwork}</div>
     </div>`;
+}
+function applyRosterState(snapshot) {
+  state.accounts = Array.isArray(snapshot && snapshot.accounts) ? snapshot.accounts : [];
+  state.rosterSections = Array.isArray(snapshot && snapshot.sections) ? snapshot.sections : [];
+  const selected = state.accounts.find((account) => account.id === state.selectedAccountId);
+  const hiddenSections = new Set(state.rosterSections.filter((section) => section.rosterHidden).map((section) => section.id));
+  if (selected && (selected.rosterHidden || hiddenSections.has(selected.sectionId))) state.selectedAccountId = null;
+}
+async function changeRoster(request, success) {
+  try {
+    applyRosterState(unwrap(await request));
+    renderAccounts();
+    renderDetail();
+    if (success) toast(success, 'good');
+  } catch (error) { toast(error.message, 'bad'); }
+}
+function sortedRosterAccounts(accounts, currentIds) {
+  return [...accounts].sort((a, b) => Number(currentIds.has(b.id)) - Number(currentIds.has(a.id))
+    || Number(Boolean(b.favorite)) - Number(Boolean(a.favorite))
+    || String(a.label || '').localeCompare(String(b.label || '')));
+}
+function rosterSectionMarkup(section, accounts, currentIds) {
+  const persisted = !!section;
+  const name = persisted ? section.name : 'No section';
+  const actions = persisted ? `<div class="roster-section__actions">
+    <button type="button" data-section-rename="${section.id}" title="Rename section">${ic('pencil', 11)}</button>
+    <button type="button" data-section-hide="${section.id}" title="Hide section">${ic('eye-off', 11)}</button>
+    <button type="button" data-section-remove="${section.id}" title="Delete section">${ic('trash-2', 11)}</button>
+  </div>` : '';
+  return `<section class="roster-section" data-roster-section="${persisted ? section.id : ''}">
+    <header class="roster-section__head"><strong>${escapeHtml(name)}</strong><span>${accounts.length}</span>${actions}</header>
+    <div class="roster-section__accounts">${accounts.map((account) => accountRow(account, currentIds.has(account.id))).join('')}</div>
+  </section>`;
+}
+function renderHiddenRoster() {
+  const hiddenSections = state.rosterSections.filter((section) => section.rosterHidden);
+  const hiddenAccounts = state.accounts.filter((account) => account.rosterHidden);
+  const total = hiddenSections.length + hiddenAccounts.length;
+  const trigger = $('#btn-hidden-roster');
+  const panel = $('#roster-hidden');
+  trigger.hidden = total === 0;
+  $('#hidden-roster-count').textContent = String(total);
+  if (!total) {
+    panel.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+  }
+  $('#roster-hidden-list').innerHTML = [
+    ...hiddenSections.map((section) => `<div class="roster-hidden__item"><span>${ic('eye-off', 11)} Section · ${escapeHtml(section.name)}</span><button type="button" data-show-section="${section.id}">Show</button></div>`),
+    ...hiddenAccounts.map((account) => `<div class="roster-hidden__item"><span>${ic('eye-off', 11)} ${escapeHtml(account.label || account.username || 'Account')}</span><button type="button" data-show-account="${account.id}">Show</button></div>`),
+  ].join('');
+  $$('[data-show-section]', panel).forEach((button) => button.addEventListener('click', () => changeRoster(api.roster.setSectionHidden(button.dataset.showSection, false), 'Section restored.')));
+  $$('[data-show-account]', panel).forEach((button) => button.addEventListener('click', () => changeRoster(api.roster.setAccountHidden(button.dataset.showAccount, false), 'Account restored.')));
 }
 function renderAccounts() {
   renderConfigAccounts();
+  renderHiddenRoster();
   const list = $('#account-list');
   const q = state.inv.accSearch;
   const currentIds = new Set(state.currentSession?.matchingAccountIds || []);
-  const filtered = state.accounts.filter((a) => !q || [a.label,
-    state.settings.hideLoginNames ? '' : a.username,
-    state.settings.hideDisplayNames ? '' : a.riotId,
-    a.leaguePlatformId].some((v) => String(v || '').toLowerCase().includes(q)));
-  const sorted = [...filtered].sort((a, b) => Number(currentIds.has(b.id)) - Number(currentIds.has(a.id))
-    || Number(Boolean(b.favorite)) - Number(Boolean(a.favorite))
-    || String(a.label || '').localeCompare(String(b.label || '')));
-  list.innerHTML = sorted.length
-    ? sorted.map((account) => accountRow(account, currentIds.has(account.id))).join('')
-    : `<p class="muted" style="padding:16px;text-align:center;font-size:12px">${state.accounts.length ? 'No matches.' : 'No accounts yet.'}</p>`;
+  const visibleSectionIds = new Set(state.rosterSections.filter((section) => !section.rosterHidden).map((section) => section.id));
+  const filtered = state.accounts.filter((a) => !a.rosterHidden && (!a.sectionId || visibleSectionIds.has(a.sectionId)))
+    .filter((a) => !q || [a.label,
+      state.settings.hideLoginNames ? '' : a.username,
+      state.settings.hideDisplayNames ? '' : a.riotId,
+      a.leaguePlatformId].some((v) => String(v || '').toLowerCase().includes(q)));
+  const groups = state.rosterSections.filter((section) => !section.rosterHidden)
+    .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+    .map((section) => ({ section, accounts: sortedRosterAccounts(filtered.filter((account) => account.sectionId === section.id), currentIds) }));
+  const unsectioned = sortedRosterAccounts(filtered.filter((account) => !account.sectionId), currentIds);
+  const renderedGroups = groups.filter((group) => group.accounts.length || !q);
+  if (unsectioned.length || (!state.rosterSections.length && !q)) renderedGroups.push({ section: null, accounts: unsectioned });
+  const visibleCount = renderedGroups.reduce((sum, group) => sum + group.accounts.length, 0);
+  list.innerHTML = !state.accounts.length && !state.rosterSections.length
+    ? '<p class="muted roster-empty">No accounts yet.</p>'
+    : renderedGroups.length && (visibleCount || !q)
+      ? renderedGroups.map((group) => rosterSectionMarkup(group.section, group.accounts, currentIds)).join('')
+      : `<p class="muted roster-empty">${q ? 'No visible matches.' : 'All accounts are hidden.'}</p>`;
   let entranceIndex = 0;
   $$('[data-select]', list).forEach((el) => {
     const id = el.dataset.select;
@@ -1212,9 +1303,31 @@ function renderAccounts() {
     state.accounts = unwrap(await api.accounts.toggleFavorite(button.dataset.rowFav));
     renderAccounts(); renderDetail();
   }));
+  $$('[data-section-rename]', list).forEach((button) => button.addEventListener('click', () => {
+    const section = state.rosterSections.find((item) => item.id === button.dataset.sectionRename);
+    const name = prompt('Rename roster section:', section ? section.name : '');
+    if (name !== null) changeRoster(api.roster.renameSection(button.dataset.sectionRename, name), 'Section renamed.');
+  }));
+  $$('[data-section-hide]', list).forEach((button) => button.addEventListener('click', () => changeRoster(api.roster.setSectionHidden(button.dataset.sectionHide, true), 'Section hidden. Use Hidden to bring it back.')));
+  $$('[data-section-remove]', list).forEach((button) => button.addEventListener('click', () => {
+    const section = state.rosterSections.find((item) => item.id === button.dataset.sectionRemove);
+    if (confirm(`Delete section "${section ? section.name : ''}"? Its accounts will move to No section.`)) {
+      changeRoster(api.roster.removeSection(button.dataset.sectionRemove), 'Section deleted; its accounts were kept.');
+    }
+  }));
   bindPortraits(list);
 }
 $('#account-search').addEventListener('input', (e) => { state.inv.accSearch = e.target.value.toLowerCase(); renderAccounts(); });
+$('#btn-section-add').addEventListener('click', () => {
+  const name = prompt('New roster section name:');
+  if (name !== null) changeRoster(api.roster.createSection(name), 'Section created.');
+});
+$('#btn-hidden-roster').addEventListener('click', (event) => {
+  const panel = $('#roster-hidden');
+  panel.hidden = !panel.hidden;
+  event.currentTarget.setAttribute('aria-expanded', String(!panel.hidden));
+});
+$('#btn-show-all-roster').addEventListener('click', () => changeRoster(api.roster.showAll(), 'All roster items restored.'));
 function selectAccount(id) { state.selectedAccountId = id; renderAccounts(); renderDetail(); }
 
 async function openAccountProfile(account, provider) {
@@ -1248,6 +1361,8 @@ function renderDetail() {
   empty.hidden = true; detail.hidden = false;
   const hasRank = a.rankName && a.rankName !== 'Unranked';
   const badges = [];
+  const rosterSection = state.rosterSections.find((section) => section.id === a.sectionId);
+  if (rosterSection) badges.push(`<span class="badge">Section · ${escapeHtml(rosterSection.name)}</span>`);
   if (a.level) badges.push(`<span class="badge badge--lvl">Level ${a.level}</span>`);
   badges.push(a.leaguePlatformId
     ? `<span class="badge badge--region" title="PUUID-verified League platform">League · ${escapeHtml(a.leaguePlatformId)}</span>`
@@ -1311,6 +1426,7 @@ function renderDetail() {
         <header><span>ACCOUNT</span><small>Roster controls</small></header>
         <div class="detail-command__buttons">
           <button class="btn btn--ghost" data-fav="${a.id}">${ic('star', 15)} ${a.favorite ? 'Unfavorite' : 'Favorite'}</button>
+          <button class="btn btn--ghost" data-hide-account="${a.id}">${ic('eye-off', 15)} Hide</button>
           <button class="iconbtn" data-edit="${a.id}" title="Edit account" aria-label="Edit account">${ic('pencil', 15)}</button>
           <button class="iconbtn iconbtn--danger" data-del="${a.id}" title="Delete account" aria-label="Delete account">${ic('trash-2', 15)}</button>
         </div>
@@ -1346,6 +1462,10 @@ function renderDetail() {
   $('[data-refresh]', detail).addEventListener('click', () => syncAccount(a.id));
   $('[data-edit]', detail).addEventListener('click', () => openModal(a.id));
   $('[data-del]', detail).addEventListener('click', () => deleteAccount(a.id));
+  $('[data-hide-account]', detail).addEventListener('click', () => changeRoster(
+    api.roster.setAccountHidden(a.id, true),
+    'Account hidden. Use Hidden in the roster header to bring it back.',
+  ));
   $('[data-fav]', detail).addEventListener('click', async () => {
     state.accounts = unwrap(await api.accounts.toggleFavorite(a.id));
     renderAccounts(); renderDetail();
@@ -1363,6 +1483,11 @@ function openModal(id = null) {
   $('#modal-title').textContent = acc ? 'Edit account' : 'Add account';
   $('#acc-id').value = acc ? acc.id : '';
   $('#acc-label').value = acc ? acc.label || '' : '';
+  $('#acc-section').innerHTML = `<option value="">No section</option>${state.rosterSections
+    .filter((section) => !section.rosterHidden || section.id === (acc && acc.sectionId))
+    .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name))
+    .map((section) => `<option value="${section.id}">${escapeHtml(section.name)}${section.rosterHidden ? ' (hidden)' : ''}</option>`).join('')}`;
+  $('#acc-section').value = acc && acc.sectionId || '';
   $('#acc-username').value = acc ? acc.username || '' : '';
   $('#acc-username').type = state.settings.hideLoginNames ? 'password' : 'text';
   $('#acc-password').value = '';
@@ -1389,6 +1514,7 @@ $('#acc-save').addEventListener('click', async () => {
   const account = {
     id: $('#acc-id').value || undefined,
     label: $('#acc-label').value.trim(),
+    sectionId: $('#acc-section').value || null,
     username: $('#acc-username').value.trim(),
     password: $('#acc-password').value,
   };
@@ -2030,6 +2156,7 @@ async function loadSettings() {
   $('#set-deceive-helper').checked = s.deceiveLeagueHelper !== false;
   $('#set-hide-login').checked = !!s.hideLoginNames;
   $('#set-hide-display').checked = !!s.hideDisplayNames;
+  $('#set-rank-borders').checked = s.showRosterRankBorders !== false;
   $('#client-detected').textContent = s.detectedClient ? `Detected: ${s.detectedClient}` : 'Riot Client not auto-detected. Set the path manually.';
   $('#enc-status').textContent = s.encryptionAvailable
     ? 'Windows OS key protection is available. Choose how this vault may use it below.'
@@ -2409,6 +2536,10 @@ async function applyPrivacySetting(key, checked) {
 }
 $('#set-hide-login').addEventListener('change', (event) => applyPrivacySetting('hideLoginNames', event.target.checked));
 $('#set-hide-display').addEventListener('change', (event) => applyPrivacySetting('hideDisplayNames', event.target.checked));
+$('#set-rank-borders').addEventListener('change', async (event) => {
+  await setSetting({ showRosterRankBorders: event.target.checked });
+  renderAccounts();
+});
 $('#set-deceive').addEventListener('change', async (event) => {
   await setSetting({ useDeceive: event.target.checked });
   updateDeceiveUI();
