@@ -25,7 +25,7 @@ const packageMetadata = require('../package.json');
 const { Vault } = require('./vault');
 const webauthn = require('./webauthn');
 const { RiotClient, RANK_TIERS, VALORANT_MAPS, VALORANT_QUEUES } = require('./riot');
-const { Catalog, vtlProfileUrl, trackerProfileUrl } = require('./valorant');
+const { Catalog, vtlProfileUrl, trackerProfileUrl, seasonActNames } = require('./valorant');
 const league = require('./league');
 const {
   switchAccount, launchProduct, killRiotProcesses, findRiotClient, clearRiotSession, GAMES,
@@ -136,6 +136,7 @@ const DEFAULT_SETTINGS = {
   hideLoginNames: false,
   hideDisplayNames: false,
   showRosterRankBorders: false,
+  autoSyncAfterLogin: true,
   featureTutorialVersion: 0,
 };
 
@@ -1144,6 +1145,24 @@ function verifiedLeaguePlatformPatch(live, leagueStats) {
   };
 }
 
+/**
+ * Replace raw VALORANT competitive season UUIDs with a human act name from
+ * valorant-api.com before this rank data ever reaches the renderer. A season
+ * whose UUID cannot be resolved is dropped rather than shown as a raw GUID.
+ */
+async function withActNames(rank) {
+  if (!rank || !Array.isArray(rank.pastSeasons) || !rank.pastSeasons.length) return rank;
+  let names;
+  try { names = await seasonActNames(); } catch { names = new Map(); }
+  const pastSeasons = rank.pastSeasons
+    .map((season) => {
+      const label = names.get(String(season.seasonId || '').toLowerCase());
+      return label ? { ...season, label } : null;
+    })
+    .filter(Boolean);
+  return { ...rank, pastSeasons };
+}
+
 async function buildAllStats(live) {
   const liveRiotId = live.gameName && live.tagLine ? `${live.gameName}#${live.tagLine}` : null;
   let valorantRankError = null;
@@ -1159,7 +1178,7 @@ async function buildAllStats(live) {
   const lcuPromise = league.buildStats(loadSettings().leaguePath)
     .then((value) => ({ value })).catch((error) => ({ error }));
   const [[freshRank, xp, wallet, playerCard], lcuResult] = await Promise.all([valorantPromise, lcuPromise]);
-  const rank = freshRank || storedValorantRankForLive(live);
+  const rank = await withActNames(freshRank || storedValorantRankForLive(live));
   const valorant = {
     available: !!rank,
     rank,
@@ -2030,8 +2049,10 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
       }
     }
     const currentSession = await buildFastCurrentSessionView(alreadyActive);
-    void refreshVerifiedAccountStats(id, acc.puuid, launchVerified ? requestedGame : '')
-      .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
+    if (settings.autoSyncAfterLogin) {
+      void refreshVerifiedAccountStats(id, acc.puuid, launchVerified ? requestedGame : '')
+        .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
+    }
     return {
       instant: true,
       mode: 'already-active',
@@ -2137,10 +2158,12 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
     vault.patchAccount(id, { riotId: currentSession.riotId || acc.riotId });
     acc = vault.listAccounts().find((item) => item.id === id);
 
-    void refreshVerifiedAccountStats(id, acc.puuid, result.launchedGame || '')
-      .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
+    if (settings.autoSyncAfterLogin) {
+      void refreshVerifiedAccountStats(id, acc.puuid, result.launchedGame || '')
+        .catch((error) => appendSwitchLog('STATS_REFRESH_FAILED', { reason: safeError(error, 'Background stats refresh failed.') }));
+    }
 
-    if (result.loginSubmitted && result.staySignedInClicked) {
+    if (settings.autoSyncAfterLogin && result.loginSubmitted && result.staySignedInClicked) {
       sessionCapture = { captured: false, reason: 'pending' };
       const captureAccount = acc;
       send('Account verified; persistent session capture continues in the background.');

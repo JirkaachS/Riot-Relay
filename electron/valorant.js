@@ -21,6 +21,50 @@ const ENDPOINTS = {
   titles: 'https://valorant-api.com/v1/playertitles',
   agents: 'https://valorant-api.com/v1/agents?isPlayableCharacter=true',
 };
+const SEASONS_ENDPOINT = 'https://valorant-api.com/v1/seasons/competitive';
+const SEASON_CACHE_TTL = 24 * 60 * 60 * 1000;
+let seasonNameCache = null; // Map<uuid, displayName>
+let seasonNameCacheAt = 0;
+let seasonNamePromise = null;
+
+/**
+ * Map a competitive act/episode UUID (the raw key Riot uses for
+ * SeasonalInfoBySeasonID) to a human act name via valorant-api.com. Falls
+ * back to an empty map on any failure so callers can degrade gracefully
+ * instead of ever displaying the raw UUID as a "season".
+ */
+async function seasonActNames() {
+  if (seasonNameCache && Date.now() - seasonNameCacheAt < SEASON_CACHE_TTL) return seasonNameCache;
+  if (seasonNamePromise) return seasonNamePromise;
+  seasonNamePromise = (async () => {
+    try {
+      const seasons = await getJSON(SEASONS_ENDPOINT);
+      const map = new Map();
+      for (const season of Array.isArray(seasons) ? seasons : []) {
+        const uuid = String(season && season.uuid || '').toLowerCase();
+        if (!uuid) continue;
+        map.set(uuid, season);
+      }
+      // Resolve each act's human label by walking up to its parent episode,
+      // since act entries alone are just "ACT I"/"ACT II"/"ACT III".
+      const names = new Map();
+      for (const [uuid, season] of map) {
+        const parent = season.parentUuid ? map.get(String(season.parentUuid).toLowerCase()) : null;
+        const episodeLabel = parent && parent.displayName ? parent.displayName : '';
+        const actLabel = season.displayName || '';
+        names.set(uuid, [episodeLabel, actLabel].filter(Boolean).join(' ').trim() || null);
+      }
+      seasonNameCache = names;
+      seasonNameCacheAt = Date.now();
+      return names;
+    } catch {
+      return seasonNameCache || new Map();
+    } finally {
+      seasonNamePromise = null;
+    }
+  })();
+  return seasonNamePromise;
+}
 
 const TIER_ORDER = ['Ultra Edition', 'Exclusive Edition', 'Premium Edition', 'Deluxe Edition', 'Select Edition', 'Standard'];
 const CACHE_TTL = 24 * 60 * 60 * 1000;
@@ -230,4 +274,4 @@ class Catalog {
   }
 }
 
-module.exports = { Catalog, TIER_ORDER, vtlProfileUrl, trackerProfileUrl };
+module.exports = { Catalog, TIER_ORDER, vtlProfileUrl, trackerProfileUrl, seasonActNames };
