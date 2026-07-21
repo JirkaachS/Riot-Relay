@@ -86,4 +86,4 @@ Riot Relay is unofficial community software and is not endorsed by Riot Games. R
 
 The built-in presence proxy is informed by [Deceive by molenzwiebel](https://github.com/molenzwiebel/Deceive). OP.GG protocol research was informed by [OPGG.py](https://github.com/ShoobyDoo/OPGG.py); its source and Python runtime are not bundled. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for complete attribution.
 
-Licensed under the [MIT License](LICENSE)
+Licensed under the [MIT License](LICENSE).
