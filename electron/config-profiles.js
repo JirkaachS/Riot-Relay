@@ -11,7 +11,7 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const MAX_FILES = 16;
 const REGISTRY_ROOT = 'HKEY_CURRENT_USER\\Software\\Riot Games\\Legends of Runeterra';
-const FILE_GAMES = new Set(['valorant', 'league']);
+const FILE_GAMES = new Set(['league']);
 const MAX_CLOUD_SETTINGS_BYTES = 8 * 1024 * 1024;
 const PLAYER_PREFERENCES_PATHS = new Set([
   '/player-preferences/v1/data-json/Ares.PlayerSettings',

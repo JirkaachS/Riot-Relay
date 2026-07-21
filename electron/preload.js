@@ -75,19 +75,6 @@ contextBridge.exposeInMainWorld('api', {
     setOptions: (options) => invoke('deceive:set-options', options),
   },
 
-  // Opt-in Discord Rich Presence. Renderer sees only sanitized runtime state.
-  discord: {
-    getState: () => invoke('discord:get-state'),
-    refresh: (game = '') => invoke('discord:refresh', String(game || '')),
-    test: () => invoke('discord:test'),
-    onState: (callback) => {
-      if (typeof callback !== 'function') return () => {};
-      const listener = (_event, runtime) => callback(runtime);
-      ipcRenderer.on('discord:state', listener);
-      return () => ipcRenderer.removeListener('discord:state', listener);
-    },
-  },
-
   // Identity-bound game preference profiles. No filesystem paths or PUUIDs
   // cross this bridge.
   configs: {

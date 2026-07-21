@@ -186,17 +186,6 @@ function normalizedIdentity(value) {
   return String(value || '').trim().toLowerCase().split('/', 1)[0].split('@', 1)[0];
 }
 
-function decodePresencePrivate(value) {
-  const encoded = String(value || '').trim();
-  if (!encoded || encoded.length > 16384 || !/^[A-Za-z0-9+/_-]*={0,2}$/.test(encoded)) return null;
-  try {
-    const bytes = Buffer.from(encoded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-    if (!bytes.length || bytes.length > 12288) return null;
-    const parsed = JSON.parse(bytes.toString('utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch { return null; }
-}
-
 const VALORANT_MAPS = {
   ascent: 'Ascent', bonsai: 'Split', canyon: 'Fracture', duality: 'Bind', foxtrot: 'Breeze',
   infinity: 'Abyss', jam: 'Lotus', pitt: 'Pearl', port: 'Icebox', triad: 'Haven', range: 'The Range',
@@ -207,40 +196,6 @@ const VALORANT_QUEUES = {
   deathmatch: 'Deathmatch', ggteam: 'Team Deathmatch', onefa: 'Replication', escalation: 'Escalation',
   premier: 'Premier', hurm: 'Escalation', newmap: 'New Map', custom: 'Custom Game',
 };
-
-function projectValorantPresence(payload, expectedPuuid) {
-  const wanted = normalizedIdentity(expectedPuuid);
-  if (!wanted) return null;
-  const rows = Array.isArray(payload) ? payload : payload && (payload.presences || payload.data);
-  if (!Array.isArray(rows)) return null;
-  for (const row of rows) {
-    const identities = [row && row.puuid, row && row.PUUID, row && row.pid, row && row.PID, row && row.jid, row && row.JID]
-      .map(normalizedIdentity).filter(Boolean);
-    if (!identities.includes(wanted)) continue;
-    const decoded = decodePresencePrivate(row.private);
-    const details = decoded && decoded.valorant && typeof decoded.valorant === 'object' ? decoded.valorant : decoded;
-    if (!details || typeof details !== 'object') return null;
-    const state = String(details.sessionLoopState || details.session_loop_state || '').toUpperCase();
-    if (!['MENUS', 'PREGAME', 'INGAME'].includes(state)) return null;
-    const flow = String(details.provisioningFlow || details.partyOwnerProvisioningFlow || '').toLowerCase();
-    const partyState = String(details.partyState || '').toLowerCase();
-    const queueKey = String(details.queueId || '').toLowerCase();
-    const mapPath = String(details.matchMap || details.partyOwnerMatchMap || '').replace(/\\/g, '/');
-    const mapKey = mapPath.split('/').filter(Boolean).pop()?.toLowerCase() || '';
-    const ally = Number(details.partyOwnerMatchScoreAllyTeam);
-    const enemy = Number(details.partyOwnerMatchScoreEnemyTeam);
-    const score = state === 'INGAME' && Number.isInteger(ally) && Number.isInteger(enemy)
-      && ally >= 0 && ally <= 999 && enemy >= 0 && enemy <= 999 ? `${ally}–${enemy}` : '';
-    const phase = state === 'INGAME' ? 'In match'
-      : state === 'PREGAME' ? 'Agent select'
-        : /matchmaking/.test(`${flow} ${partyState}`) ? 'In queue' : 'In menus';
-    return {
-      product: 'valorant', game: 'VALORANT', mode: VALORANT_QUEUES[queueKey] || '',
-      map: VALORANT_MAPS[mapKey] || '', phase, phaseCode: state, score,
-    };
-  }
-  return null;
-}
 
 function boundedRankInteger(value, max = 1000000) {
   if (value === undefined || value === null || value === '') return null;
@@ -410,12 +365,6 @@ class RiotClient {
   /** Read local chat presence rows; decoding and sanitization stay in the main process. */
   async fetchChatPresences() {
     return this.local('/chat/v4/presences');
-  }
-
-  /** Project only the verified current player's bounded VALORANT live state. */
-  async fetchValorantLive(session) {
-    if (!session || !session.puuid) return null;
-    return projectValorantPresence(await this.fetchChatPresences(), session.puuid);
   }
 
   /** Read one conversation, or all recent conversations when cid is omitted. */
@@ -852,7 +801,6 @@ module.exports = {
   VALORANT_QUEUES,
   parseRiotClientUxProcessRows,
   resolveRiotClientUxEndpoint,
-  projectValorantPresence,
   rankFromMmr,
   rankFromCompetitiveUpdates,
 };

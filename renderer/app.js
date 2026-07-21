@@ -36,7 +36,6 @@ const state = {
   settings: {},
   updates: { status: 'idle', currentVersion: '1.3.3', availableVersion: null, progress: 0 },
   startup: { supported: false, enabled: false, reason: 'Checking Windows startup registration…' },
-  discord: { enabled: false, connected: false, configured: false, preview: null, lastError: null },
   configProfiles: [],
   configProfilesError: null,
   configRoles: { intentional: false },
@@ -1014,17 +1013,33 @@ function rankedRows(game, gameId) {
     </article>`;
   }).join('')}</div>`;
 }
+function trustedRankSeason(value) {
+  const season = String(value || '').trim();
+  return /^s?20\d{2}(?:[-_. ](?:split|season)[-_. ]?\d{1,2})?$/i.test(season)
+    || /^(?:season|set|act)[-_. ]?[a-z0-9][a-z0-9 ._-]{0,31}$/i.test(season);
+}
 function seasonLabel(value, index, gameId) {
   const season = String(value || '').trim();
   if (/^s?20\d{2}$/i.test(season)) return season.toUpperCase().replace(/^S?/, 'S');
-  if (/^(?:season|set|act)\s*[a-z0-9 ._-]{1,16}$/i.test(season)) return season;
-  return gameId === 'valorant' ? `Previous act ${index + 1}` : `Previous season ${index + 1}`;
+  const yearSplit = season.match(/^s?(20\d{2})[-_. ](?:split|season)[-_. ]?(\d{1,2})$/i);
+  if (yearSplit) return `S${yearSplit[1]} Split ${yearSplit[2]}`;
+  const recognized = season.match(/^(season|set|act)[\s._-]*([a-z0-9][a-z0-9 ._-]{0,31})$/i);
+  if (recognized) return `${recognized[1].charAt(0).toUpperCase()}${recognized[1].slice(1).toLowerCase()} ${recognized[2].replace(/[-_.]+/g, ' ')}`;
+  return gameId === 'valorant' ? `Previous act ${index + 1}` : 'Past rank';
 }
 function rankHistory(history, gameId) {
-  const rows = Array.isArray(history) ? [...history].reverse().slice(0, 8) : [];
-  if (!rows.length) return '<div class="rank-history rank-history--empty"><span>Past ranks</span><small>No historical rank data returned by this source.</small></div>';
+  const source = Array.isArray(history) ? history : [];
+  // Old provider fragments without a recognizable season identity were once
+  // persisted as numbered League/TFT history. Filter them at render time too,
+  // so false seasons disappear immediately without requiring another sync.
+  const verifiedSource = gameId === 'valorant'
+    ? source
+    : source.filter((row) => row && trustedRankSeason(row.label || row.seasonId));
+  const rows = (gameId === 'valorant' ? [...verifiedSource].reverse() : [...verifiedSource]).slice(0, 8);
+  const verifiedCopy = gameId === 'valorant' ? '' : 'verified ';
+  if (!rows.length) return `<div class="rank-history rank-history--empty"><span>Past ranks</span><small>No ${verifiedCopy}historical rank data returned by this source.</small></div>`;
   return `<details class="rank-history">
-    <summary><span>Past ranks</span><small>${rows.length} record${rows.length === 1 ? '' : 's'}</small></summary>
+    <summary><span>Past ranks</span><small>${rows.length} ${verifiedCopy}record${rows.length === 1 ? '' : 's'}</small></summary>
     <div class="rank-history__rows">${rows.map((row, index) => {
       const tierName = String(row.tierName || row.tier || 'UNRANKED').toUpperCase();
       const division = tierName === 'UNRANKED' ? '' : String(row.division || '').toUpperCase();
@@ -1113,13 +1128,48 @@ async function refreshAccounts() {
   try { state.accounts = unwrap(await api.accounts.list()); } catch { state.accounts = []; }
   await refreshConfigProfiles();
 }
+const ROSTER_RANK_SCORES = {
+  league: { IRON: 100, BRONZE: 200, SILVER: 300, GOLD: 400, PLATINUM: 500, EMERALD: 600, DIAMOND: 700, MASTER: 800, GRANDMASTER: 950, CHALLENGER: 1000 },
+  valorant: { IRON: 100, BRONZE: 200, SILVER: 300, GOLD: 400, PLATINUM: 500, DIAMOND: 650, ASCENDANT: 725, IMMORTAL: 825, RADIANT: 925 },
+};
+function normalizedRosterTier(value) {
+  return String(value || '').trim().toUpperCase().replace(/\s+[123]$/, '');
+}
+function bestRosterRank(account) {
+  const stats = statsFor(account);
+  const candidates = [];
+  const valorant = stats.valorant && stats.valorant.rank;
+  const valorantTier = normalizedRosterTier(valorant && (valorant.tierName || valorant.name));
+  if (valorant && ROSTER_RANK_SCORES.valorant[valorantTier] && hasRankedValorantEvidence(valorant)) {
+    candidates.push({
+      game: 'valorant', score: ROSTER_RANK_SCORES.valorant[valorantTier] * 10000 + (Number(valorant.tier) || 0),
+      tier: valorant.tier, tierName: String(valorant.tierName || valorant.name),
+      label: `${valorant.tierName || valorant.name}${valorant.rr != null ? ` · ${fmt(valorant.rr)} RR` : ''}`,
+    });
+  }
+  const league = stats.league || {};
+  for (const queue of Array.isArray(league.queues) ? league.queues : []) {
+    const tierName = normalizedRosterTier(queue && (queue.tier || queue.tierName));
+    if (!queue || !ROSTER_RANK_SCORES.league[tierName]) continue;
+    const divisionScore = { IV: 1, III: 2, II: 3, I: 4 }[String(queue.division || '').toUpperCase()] || 0;
+    candidates.push({
+      game: 'league', score: ROSTER_RANK_SCORES.league[tierName] * 10000 + divisionScore * 100 + (Number(queue.lp) || 0),
+      tierName, division: String(queue.division || '').toUpperCase(), queue: queue.queue,
+      label: `${tierName} ${String(queue.division || '').toUpperCase()}${queue.lp != null ? ` · ${fmt(queue.lp)} LP` : ''}`.replace(/\s+/g, ' ').trim(),
+    });
+  }
+  return candidates.sort((left, right) => right.score - left.score)[0] || null;
+}
 function accountRow(a, signedIn = false) {
-  const sub = a.rankName && a.rankName !== 'Unranked'
-    ? `${a.rankName}${a.rr != null ? ` · ${a.rr} RR` : ''}`
+  const bestRank = bestRosterRank(a);
+  const sub = bestRank ? bestRank.label
     : (a.riotId ? displayRiotId(a.riotId) : a.username ? displayLogin(a.username) : 'Not synced');
   const active = a.id === state.selectedAccountId ? ' is-active' : '';
   const favorite = a.favorite ? ' is-favorite' : '';
   const current = signedIn ? ' is-signed-in' : '';
+  const rankArtwork = bestRank
+    ? (bestRank.game === 'league' ? rankEmblem(bestRank.tierName, 'league', 'arow__rank') : rankIcon(bestRank.tier, 'arow__rank'))
+    : '';
   return `
     <div class="arow${active}${favorite}${current}" data-select="${a.id}">
       ${portraitMarkup(a, 'arow__av')}
@@ -1128,7 +1178,7 @@ function accountRow(a, signedIn = false) {
         <div class="arow__sub">${escapeHtml(sub)}</div>
       </div>
       <button class="arow__favorite${a.favorite ? ' is-active' : ''}" data-row-fav="${a.id}" title="${a.favorite ? 'Remove from favorites' : 'Add to favorites'}" aria-label="${a.favorite ? 'Remove from favorites' : 'Add to favorites'}">${ic('star', 14, { fill: !!a.favorite })}</button>
-      <div class="arow__rankslot">${a.rankName && a.rankName !== 'Unranked' ? rankIcon(a.rankTier, 'arow__rank') : ''}</div>
+      <div class="arow__rankslot" title="${bestRank ? escapeHtml(`${bestRank.game === 'league' ? 'League of Legends' : 'VALORANT'} · ${bestRank.label}`) : ''}">${rankArtwork}</div>
     </div>`;
 }
 function renderAccounts() {
@@ -1976,23 +2026,6 @@ async function loadSettings() {
   $('#deceive-activity-mode').value = s.deceiveActivityMode || 'hide';
   $('#deceive-custom-status').value = s.deceiveCustomStatus || '';
   $('#set-deceive-helper').checked = s.deceiveLeagueHelper !== false;
-  $('#set-discord-enabled').checked = !!s.discordPresenceEnabled;
-  $('#set-discord-client-id').value = s.discordClientId || '';
-  $('#set-discord-game').checked = s.discordShowGame !== false;
-  $('#set-discord-rank').checked = !!s.discordShowRank;
-  $('#set-discord-riot-id').checked = !!s.discordShowRiotId;
-  $('#set-discord-status').checked = !!s.discordShowStatus;
-  $('#set-discord-elapsed').checked = s.discordShowElapsed !== false;
-  $('#set-discord-live').checked = !!s.discordShowLiveMatch;
-  $('#set-discord-match-mode').checked = !!s.discordShowMatchMode;
-  $('#set-discord-match-map').checked = !!s.discordShowMatchMap;
-  $('#set-discord-match-phase').checked = !!s.discordShowMatchPhase;
-  $('#set-discord-match-score').checked = !!s.discordShowMatchScore;
-  $('#set-discord-match-elapsed').checked = !!s.discordShowMatchElapsed;
-  updateDiscordLiveOptions();
-  $('#set-discord-details').value = s.discordCustomDetails || '';
-  $('#set-discord-state').value = s.discordCustomState || '';
-  $('#set-discord-image').value = s.discordLargeImage || '';
   $('#set-hide-login').checked = !!s.hideLoginNames;
   $('#set-hide-display').checked = !!s.hideDisplayNames;
   $('#client-detected').textContent = s.detectedClient ? `Detected: ${s.detectedClient}` : 'Riot Client not auto-detected. Set the path manually.';
@@ -2004,8 +2037,6 @@ async function loadSettings() {
     : 'Windows Hello is not configured or unavailable; standard OS-stored mode can still be used.';
   updateDeceiveUI();
   refreshDeceiveState();
-  refreshDiscordState();
-  if (s.discordPresenceEnabled) api.discord.refresh('').then(unwrap).then(refreshDiscordState).catch(() => refreshDiscordState());
   refreshConfigProfiles();
   renderConfigAccounts();
   refreshCatalogStatus();
@@ -2052,70 +2083,6 @@ async function refreshDeceiveState() {
     updateDeceiveUI();
     return null;
   }
-}
-async function refreshDiscordState(runtime = null) {
-  try { state.discord = runtime || unwrap(await api.discord.getState()); }
-  catch { state.discord = { enabled: false, connected: false, configured: false, published: false, status: 'unavailable', lastError: 'Discord activity is unavailable.' }; }
-  const enabled = !!state.settings.discordPresenceEnabled;
-  const status = String(state.discord.status || (state.discord.published ? 'published' : state.discord.connected ? 'publishing' : 'idle'));
-  const labels = {
-    disabled: 'Disabled', unconfigured: 'Application ID required', unavailable: 'Unavailable', connecting: 'Finding Discord',
-    'not-running': 'Discord not running', handshake: 'Discord handshake', publishing: 'Publishing activity',
-    published: 'Published', rejected: 'Rejected', idle: enabled ? 'Waiting for Discord' : 'Disabled',
-  };
-  const runtimeEl = $('#discord-runtime');
-  runtimeEl.className = `deceive-runtime ${status === 'published' ? 'is-connected' : enabled ? 'is-running' : ''}`;
-  runtimeEl.innerHTML = `<i class="dot ${status === 'published' ? 'dot--on' : enabled ? 'dot--wait' : 'dot--off'}"></i><span>${escapeHtml(labels[status] || 'Discord activity')}</span>`;
-  const preview = state.discord.preview || {};
-  $('#discord-preview').textContent = `${preview.details || 'Riot Relay'}${preview.state ? ` — ${preview.state}` : ''}`;
-  const diagnostics = [];
-  if (state.discord.lastError) diagnostics.push(state.discord.lastError);
-  else if (status === 'published') diagnostics.push('Discord acknowledged SET_ACTIVITY. The activity is published.');
-  else if (status === 'handshake') diagnostics.push('Local pipe connected; waiting for Discord READY.');
-  else if (status === 'publishing') diagnostics.push('READY received; waiting for Discord to acknowledge SET_ACTIVITY.');
-  else if (status === 'connecting') diagnostics.push('Checking Discord desktop activity pipes.');
-  else if (status === 'unconfigured') diagnostics.push('Enter the public Application ID from your Discord developer application.');
-  else if (status === 'not-running') diagnostics.push('Start Discord desktop, then retry. Browser Discord does not expose the local activity pipe.');
-  else diagnostics.push(state.discord.closeReason || 'Discord activity is idle.');
-  if (Number.isInteger(state.discord.pipe)) diagnostics.push(`Pipe ${state.discord.pipe}`);
-  if (state.discord.lastPublishAt) diagnostics.push(`Last acknowledgement ${new Date(state.discord.lastPublishAt).toLocaleTimeString()}`);
-  if (state.discord.reconnectCount > 0) diagnostics.push(`${state.discord.reconnectCount} reconnect attempt${state.discord.reconnectCount === 1 ? '' : 's'}`);
-  $('#discord-diagnostics').textContent = diagnostics.filter(Boolean).join(' · ');
-}
-
-function updateDiscordLiveOptions() {
-  const enabled = $('#set-discord-live').checked;
-  $$('#discord-live-fields input').forEach((input) => (input.disabled = !enabled));
-  $('#discord-live-fields').classList.toggle('is-disabled', !enabled);
-}
-
-function discordSettingsPatch() {
-  return {
-    discordPresenceEnabled: $('#set-discord-enabled').checked,
-    discordClientId: $('#set-discord-client-id').value.trim(),
-    discordShowGame: $('#set-discord-game').checked,
-    discordShowRank: $('#set-discord-rank').checked,
-    discordShowRiotId: $('#set-discord-riot-id').checked,
-    discordShowStatus: $('#set-discord-status').checked,
-    discordShowElapsed: $('#set-discord-elapsed').checked,
-    discordShowLiveMatch: $('#set-discord-live').checked,
-    discordShowMatchMode: $('#set-discord-match-mode').checked,
-    discordShowMatchMap: $('#set-discord-match-map').checked,
-    discordShowMatchPhase: $('#set-discord-match-phase').checked,
-    discordShowMatchScore: $('#set-discord-match-score').checked,
-    discordShowMatchElapsed: $('#set-discord-match-elapsed').checked,
-    discordCustomDetails: $('#set-discord-details').value.trim(),
-    discordCustomState: $('#set-discord-state').value.trim(),
-    discordLargeImage: $('#set-discord-image').value.trim(),
-  };
-}
-
-async function saveDiscordSettings(refresh = true) {
-  await setSetting(discordSettingsPatch());
-  if (refresh && state.settings.discordPresenceEnabled) {
-    try { await refreshDiscordState(unwrap(await api.discord.refresh(''))); }
-    catch (error) { await refreshDiscordState(); toast(error.message, 'warn'); }
-  } else await refreshDiscordState();
 }
 
 function configNamespace() { return $('#config-game').value === 'lol' || $('#config-game').value === 'tft' ? 'league' : $('#config-game').value; }
@@ -2220,7 +2187,6 @@ function renderConfigProfileStatus() {
   const linkedCount = linkedConfigAccounts().length;
   const enoughLinkedAccounts = linkedCount >= 2;
   const activeId = activeConfigAccountId();
-  const activeCaptureRequired = namespace !== 'valorant';
   const differentAccounts = !!sourceId && !!targetId && sourceId !== targetId;
   const sourceLinked = source?.linked === true;
   const targetLinked = target?.linked === true;
@@ -2228,8 +2194,8 @@ function renderConfigProfileStatus() {
   const targetReady = !!(target && target.profiles && target.profiles[namespace]);
   const sourceInvalid = !!(source && source.profileErrors && source.profileErrors[namespace]);
   const targetInvalid = !!(target && target.profileErrors && target.profileErrors[namespace]);
-  const sourceCaptureAllowed = enoughLinkedAccounts && sourceLinked && (!activeCaptureRequired || activeId === sourceId);
-  const targetCaptureAllowed = enoughLinkedAccounts && targetLinked && (!activeCaptureRequired || activeId === targetId);
+  const sourceCaptureAllowed = enoughLinkedAccounts && sourceLinked && activeId === sourceId;
+  const targetCaptureAllowed = enoughLinkedAccounts && targetLinked && activeId === targetId;
   const bound = !!(target && target.bindings && target.bindings[namespace]);
   const applicable = !!(target && target.bindingApplicable && target.bindingApplicable[namespace]);
   const boundSourceId = target && target.bindingSources && target.bindingSources[namespace];
@@ -2241,8 +2207,8 @@ function renderConfigProfileStatus() {
   const gameName = $('#config-game').selectedOptions[0]?.textContent || 'Game';
   const unavailable = !!state.configProfilesError;
 
-  const sourceCapturePrompt = namespace === 'valorant' ? 'Capture PUUID-owned Riot folder' : activeId === sourceId ? 'Signed-in account ready to capture' : 'Sign into this account to capture';
-  const targetCapturePrompt = namespace === 'valorant' ? 'Capture PUUID-owned baseline' : activeId === targetId ? 'Signed-in account ready to capture' : 'Sign into this account to capture';
+  const sourceCapturePrompt = activeId === sourceId ? 'Signed-in account ready to capture' : 'Sign into this account to capture';
+  const targetCapturePrompt = activeId === targetId ? 'Signed-in account ready to capture' : 'Sign into this account to capture';
   $('#config-source-status').textContent = unavailable ? 'Status unavailable — controls paused'
     : !enoughLinkedAccounts ? 'Link at least two roster accounts'
       : !sourceLinked ? 'Sync this account first'
@@ -2357,32 +2323,6 @@ $('#set-startup').addEventListener('change', async (event) => {
   }
 });
 
-api.discord.onState((runtime) => refreshDiscordState(runtime));
-$('#set-discord-live').addEventListener('change', () => {
-  updateDiscordLiveOptions();
-  saveDiscordSettings(true);
-});
-$('#btn-discord-save').addEventListener('click', async () => {
-  await saveDiscordSettings(true);
-  toast(state.settings.discordPresenceEnabled ? 'Discord activity settings saved.' : 'Discord activity disabled and cleared.', 'good');
-});
-$('#set-discord-enabled').addEventListener('change', () => saveDiscordSettings(true));
-$('#btn-discord-refresh').addEventListener('click', async (event) => {
-  const button = event.currentTarget; button.disabled = true; button.classList.add('is-loading');
-  try { await refreshDiscordState(unwrap(await api.discord.refresh(''))); toast('Discord activity refreshed from the verified Riot session.', 'good'); }
-  catch (error) { toast(error.message, 'warn'); await refreshDiscordState(); }
-  finally { button.disabled = false; button.classList.remove('is-loading'); }
-});
-$('#btn-discord-test').addEventListener('click', async (event) => {
-  const button = event.currentTarget; button.disabled = true; button.classList.add('is-loading');
-  try {
-    await setSetting(discordSettingsPatch());
-    const runtime = unwrap(await api.discord.test());
-    await refreshDiscordState(runtime);
-    toast('Minimal Discord activity submitted. Wait for Published to confirm Discord acknowledged it.', 'good');
-  } catch (error) { toast(error.message, 'warn'); await refreshDiscordState(); }
-  finally { button.disabled = false; button.classList.remove('is-loading'); }
-});
 $('#config-source').addEventListener('change', () => { enforceDistinctConfigRoles('source'); state.configRoles.intentional = true; renderConfigProfileStatus(); });
 $('#config-target').addEventListener('change', () => { enforceDistinctConfigRoles('target'); state.configRoles.intentional = true; renderConfigProfileStatus(); });
 $('#config-game').addEventListener('change', renderConfigProfileStatus);
@@ -2390,10 +2330,10 @@ $('#btn-config-source-current').addEventListener('click', () => useActiveConfigA
 $('#btn-config-target-current').addEventListener('click', () => useActiveConfigAccount('target'));
 $('#btn-config-capture-source').addEventListener('click', (event) => runConfigAction(event.currentTarget,
   () => api.configs.capture($('#config-source').value, $('#config-game').value).then(unwrap),
-  $('#config-game').value === 'valorant' ? 'Source preferences captured from its PUUID-owned Riot folder.' : 'Source preferences captured while the selected PUUID was verified.'));
+  'Source preferences captured while the selected PUUID was verified.'));
 $('#btn-config-capture-target').addEventListener('click', (event) => runConfigAction(event.currentTarget,
   () => api.configs.capture($('#config-target').value, $('#config-game').value).then(unwrap),
-  $('#config-game').value === 'valorant' ? 'Target baseline captured from its PUUID-owned Riot folder.' : 'Target baseline captured while the selected PUUID was verified.'));
+  'Target baseline captured while the selected PUUID was verified.'));
 $('#btn-config-migrate').addEventListener('click', (event) => runConfigAction(event.currentTarget,
   () => api.configs.migrate($('#config-source').value, $('#config-target').value, $('#config-game').value).then(unwrap),
   'Binding saved. No files were changed; use Apply and launch target.'));

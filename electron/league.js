@@ -341,12 +341,14 @@ function providerCollectionRows(value, inherited = {}, depth = 0) {
     const currentCollection = /^(?:current|current_season|currentSeason)$/i.test(key);
     const historicalCollection = /^(?:history|previous|past|previous_seasons|previousSeasons|past_seasons|pastSeasons)$/i.test(key);
     const genericCollection = /^(?:data|items|rows|seasons|ranking|rankings|entry|entries)$/i.test(key);
+    const seasonKey = trustedProviderSeasonId(key);
     let next;
     if (queue) next = { ...inherited, queue_type: inherited.queue_type || queue };
     else if (currentCollection) next = { ...inherited, is_current: true };
     else if (historicalCollection) next = { ...inherited, is_current: false };
     else if (genericCollection) next = inherited;
-    else next = { ...inherited, season_id: inherited.season_id || providerText(key, 128) };
+    else if (seasonKey) next = { ...inherited, season_id: inherited.season_id || seasonKey };
+    else next = inherited;
     rows.push(...providerCollectionRows(nested, next, depth + 1));
     if (rows.length >= PROVIDER_ROW_LIMIT) break;
   }
@@ -361,6 +363,21 @@ function providerSeasonId(row) {
     return providerText(aliasValue(value, ['id', 'season_id', 'seasonId', 'name', 'display_name', 'displayName']), 128);
   }
   return providerText(value, 128);
+}
+
+function trustedProviderSeasonId(value) {
+  const season = providerText(value, 128);
+  if (/^s?20\d{2}(?:[-_. ](?:split|season)[-_. ]?\d{1,2})?$/i.test(season)) return season;
+  if (/^(?:season|set|act)[-_. ]?[a-z0-9][a-z0-9 ._-]{0,31}$/i.test(season)) return season;
+  return '';
+}
+
+function providerSeasonOrder(value) {
+  const season = String(value || '');
+  const year = season.match(/20\d{2}/);
+  const numbers = season.match(/\d+/g) || [];
+  if (year) return Number(year[0]) * 100 + Number(numbers.find((item) => item !== year[0]) || 0);
+  return Number(numbers[0] || 0);
 }
 
 function providerHistoryRows(containers, currentRows = []) {
@@ -385,14 +402,18 @@ function normalizedPastSeasons(rows, fallbackQueue = '') {
   for (const row of rows.slice(0, PROVIDER_ROW_LIMIT)) {
     const rank = providerRankedQueue(row, fallbackQueue);
     if (!rank) continue;
-    const seasonId = providerSeasonId(row) || null;
-    const key = `${seasonId || ''}|${rank.queue}|${rank.tier}|${rank.division}|${rank.lp ?? ''}`;
+    // OP.GG frequently returns old rank fragments without a season identity.
+    // Showing those as numbered "previous seasons" invents chronology, so only
+    // retain history that carries a recognizable provider season label.
+    const seasonId = trustedProviderSeasonId(providerSeasonId(row));
+    if (!seasonId) continue;
+    const key = `${seasonId.toLowerCase()}|${rank.queue}|${rank.tier}|${rank.division}|${rank.lp ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push({ seasonId, ...rank });
     if (result.length >= PROVIDER_SEASON_LIMIT) break;
   }
-  return result;
+  return result.sort((left, right) => providerSeasonOrder(right.seasonId) - providerSeasonOrder(left.seasonId));
 }
 
 function dedupeCurrentQueues(rows) {
@@ -413,8 +434,12 @@ function opggLeaguePayload(summoner, summary) {
   const leagueStats = containers.map((value) => aliasValue(value, ['league_stats', 'leagueStats']))
     .find((value) => value && typeof value === 'object');
   const rows = providerCollectionRows(leagueStats || {});
-  const currentRows = rows.filter((row) => !historicalProviderRecord(row));
-  const historyRows = rows.filter(historicalProviderRecord);
+  const explicitlyCurrent = (row) => providerBoolean(row, ['is_current', 'isCurrent', 'current']) === true;
+  const hasTrustedSeason = (row) => Boolean(trustedProviderSeasonId(providerSeasonId(row)));
+  const currentRows = rows.filter((row) => explicitlyCurrent(row)
+    || (!historicalProviderRecord(row) && !hasTrustedSeason(row)));
+  const historyRows = rows.filter((row) => historicalProviderRecord(row)
+    || (!explicitlyCurrent(row) && hasTrustedSeason(row)));
   historyRows.push(...providerHistoryRows(containers, rows));
   return {
     queues: dedupeCurrentQueues(currentRows.map((row) => providerRankedQueue(row)).filter(Boolean)),
@@ -1199,92 +1224,6 @@ function lcu(lock, pathname) {
   });
 }
 
-function liveClient(pathname) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      { hostname: '127.0.0.1', port: 2999, path: pathname, method: 'GET', headers: { Accept: 'application/json' }, agent },
-      (res) => {
-        const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`Live client HTTP ${res.statusCode}`));
-          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('Live client returned unreadable data.')); }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.setTimeout(4000, () => req.destroy(new Error('Live client request timed out.')));
-    req.end();
-  });
-}
-
-const LEAGUE_PHASES = {
-  Lobby: 'In lobby', Matchmaking: 'In queue', ReadyCheck: 'Ready check', ChampSelect: 'Champion select',
-  GameStart: 'Starting match', InProgress: 'In match', WaitingForStats: 'Match ending',
-  PreEndOfGame: 'Match ending', EndOfGame: 'Post game', None: 'In client',
-};
-const LEAGUE_QUEUES = {
-  RANKED_SOLO_5X5: 'Ranked Solo/Duo', RANKED_FLEX_SR: 'Ranked Flex', NORMAL: 'Normal',
-  ARAM_UNRANKED_5X5: 'ARAM', CHERRY: 'Arena', RANKED_TFT: 'Ranked TFT',
-  RANKED_TFT_DOUBLE_UP: 'TFT Double Up', NORMAL_TFT: 'TFT Normal', TURBO: 'Swiftplay',
-};
-const LEAGUE_MAPS = {
-  "summoner's rift": "Summoner's Rift", 'howling abyss': 'Howling Abyss', 'convergence': 'Convergence',
-  'rings of wrath': 'Arena', 'teamfight tactics': 'Convergence',
-};
-
-function projectLeagueLiveSession(gameflow, gameStats = null, playerScore = null) {
-  if (!gameflow || typeof gameflow !== 'object') return null;
-  const phaseCode = String(gameflow.phase || '');
-  if (!Object.prototype.hasOwnProperty.call(LEAGUE_PHASES, phaseCode)) return null;
-  const data = gameflow.gameData && typeof gameflow.gameData === 'object' ? gameflow.gameData : {};
-  const queue = data.queue && typeof data.queue === 'object' ? data.queue : {};
-  const map = data.map && typeof data.map === 'object' ? data.map : {};
-  const queueType = String(queue.type || data.queueType || '').toUpperCase();
-  const gameMode = String(data.gameMode || gameStats && gameStats.gameMode || '').toUpperCase();
-  const rawMap = String(map.name || gameStats && gameStats.mapName || '').trim().toLowerCase();
-  const tft = /TFT/.test(`${queueType} ${gameMode}`) || rawMap === 'convergence' || rawMap === 'teamfight tactics';
-  const seconds = Number(gameStats && gameStats.gameTime);
-  const startedAt = phaseCode === 'InProgress' && Number.isFinite(seconds) && seconds >= 0 && seconds <= 86400
-    ? Date.now() - Math.floor(seconds * 1000) : null;
-  const kills = Number(playerScore && playerScore.kills);
-  const deaths = Number(playerScore && playerScore.deaths);
-  const assists = Number(playerScore && playerScore.assists);
-  const score = !tft && [kills, deaths, assists].every((value) => Number.isInteger(value) && value >= 0 && value <= 999)
-    ? `K/D/A ${kills}/${deaths}/${assists}` : '';
-  return {
-    product: tft ? 'tft' : 'league', game: tft ? 'Teamfight Tactics' : 'League of Legends',
-    mode: LEAGUE_QUEUES[queueType] || (gameMode === 'CLASSIC' ? 'Classic' : gameMode === 'ARAM' ? 'ARAM' : ''),
-    map: LEAGUE_MAPS[rawMap] || '', phase: LEAGUE_PHASES[phaseCode], phaseCode,
-    score, matchStartedAt: startedAt,
-  };
-}
-
-async function fetchLiveSession(configuredPath, expectedPuuid) {
-  const wanted = String(expectedPuuid || '').trim().toLowerCase();
-  if (!wanted) throw new Error('An expected PUUID is required for League live activity.');
-  const lock = await resolveLcu(configuredPath);
-  const before = await lcu(lock, '/lol-summoner/v1/current-summoner');
-  if (String(before && before.puuid || '').trim().toLowerCase() !== wanted) throw new Error('League Client is signed into a different Riot identity.');
-  const gameflow = await lcu(lock, '/lol-gameflow/v1/session');
-  let gameStats = null;
-  let playerScore = null;
-  if (String(gameflow && gameflow.phase || '') === 'InProgress') {
-    gameStats = await liveClient('/liveclientdata/gamestats').catch(() => null);
-    const projected = projectLeagueLiveSession(gameflow, gameStats);
-    if (projected && projected.product === 'league') {
-      const active = await liveClient('/liveclientdata/activeplayer').catch(() => null);
-      const summonerName = String(active && active.summonerName || '');
-      if (summonerName && summonerName.length <= 128 && !/[\u0000-\u001f\u007f]/.test(summonerName)) {
-        playerScore = await liveClient(`/liveclientdata/playerscores?summonerName=${encodeURIComponent(summonerName)}`).catch(() => null);
-      }
-    }
-  }
-  const after = await lcu(lock, '/lol-summoner/v1/current-summoner');
-  if (String(after && after.puuid || '').trim().toLowerCase() !== wanted) throw new Error('League identity changed while reading live activity.');
-  return projectLeagueLiveSession(gameflow, gameStats, playerScore);
-}
-
 /** LCU asset path -> Community Dragon URL. */
 function cdragon(assetPath) {
   if (!assetPath) return '';
@@ -1725,7 +1664,7 @@ async function buildStats(configuredPath) {
 }
 
 module.exports = {
-  buildLeague, buildTft, buildStats, fetchLiveSession, projectLeagueLiveSession,
+  buildLeague, buildTft, buildStats,
   fetchOpggStats, fetchOpggTftStats, discoverOpggStats, discoverOpggTftStats,
   opggProfileUrl, uggProfileUrl, deeplolProfileUrl, dpmProfileUrl, profileLinks,
   opggRegion, uggRegion, deeplolRegion,

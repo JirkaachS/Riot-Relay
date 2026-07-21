@@ -691,7 +691,9 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .arow__favorite:hover { border-color: #3a3a43; background: #222228; color: #c8a65f; }
 .arow__favorite.is-active { border-color: rgba(214,165,74,.28); background: rgba(214,165,74,.11); color: #e0b95f; filter: drop-shadow(0 0 5px rgba(214,165,74,.2)); }
 .arow__rankslot { width: 24px; height: 24px; align-self: center; display: grid; place-items: center; }
-.arow__rank { width: 22px; height: 22px; }
+.arow__rank { position: relative; width: 22px; height: 22px; display: grid; place-items: center; flex: none; object-fit: contain; }
+.arow__rank > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+.arow__rank .rank-emblem__fallback { width: 18px; height: 18px; font-size: 5.5px; }
 .detail__av { position: relative; width: 52px; height: 52px; overflow: hidden; border-radius: 8px; }
 .detail__av img { object-position: center; }
 .detail__label .star.on { display: inline-flex; color: #e0b95f; filter: drop-shadow(0 0 5px rgba(214,165,74,.28)); }
@@ -837,17 +839,10 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .update-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
 .update-actions .btn[hidden] { display: none; }
 
-/* ---------- Discord activity, config profiles, and chat ergonomics ---------- */
+/* ---------- Config profiles and chat ergonomics ---------- */
 .feature-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
 .feature-panel-head h3 { margin-bottom: 2px; }
 .feature-panel-head .hint { max-width: 610px; margin-top: 0; }
-.feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; margin: 12px 0; padding: 9px 10px; border: 1px solid var(--line); background: #101014; }
-.feature-grid .toggle { margin: 0; }
-.feature-grid--fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.feature-grid--fields .field { margin: 0; }
-.feature-grid--fields .field:last-child { grid-column: 1 / -1; }
-.feature-preview { margin: 9px 0 0; padding: 9px 10px; border: 1px solid #303038; background: #0d0d11; color: #b9b9c4; font-size: 10.5px; line-height: 1.45; overflow-wrap: anywhere; }
-.discord-diagnostics { margin: 0 0 9px; padding: 7px 10px; border: 1px solid #282830; border-top: 0; background: #111115; color: var(--muted); font-size: 9.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .config-workflow { display: grid; gap: 8px; margin-top: 12px; }
 .config-step { position: relative; padding: 12px; border: 1px solid var(--line); background: #0d0d11; transition: border-color .14s, opacity .14s; }
 .config-step::before { content: ''; position: absolute; inset: -1px auto -1px -1px; width: 2px; background: #34343d; }
@@ -876,7 +871,7 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .config-route { margin: 0 0 8px 31px; padding: 9px 10px; border: 1px solid #34343d; background: #15151a; color: #d2d2da; font-size: 11px; font-weight: 650; overflow-wrap: anywhere; }
 .config-application { margin: 0 0 8px 31px; padding: 8px 10px; border-left: 2px solid #4b4b56; background: #111115; color: var(--muted); font-size: 9.5px; line-height: 1.5; }
 .config-safety-list { margin: 0 0 10px 47px; color: var(--muted); font-size: 9.5px; line-height: 1.55; }
-.config-panel .settings-actions, .discord-panel .settings-actions { flex-wrap: wrap; margin-top: 10px; }
+.config-panel .settings-actions { flex-wrap: wrap; margin-top: 10px; }
 .config-cloud { margin: 12px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); }
 .config-cloud__status { margin-top: 8px; font-size: 9.5px; color: var(--muted); }
 .config-cloud[hidden] { display: none; }
@@ -899,15 +894,8 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .chat-compose-meta { grid-column: 1; display: flex; justify-content: space-between; gap: 12px; padding: 0 2px; color: #5f5f69; font-size: 8.5px; }
 .chat-composer .btn { grid-column: 2; grid-row: 1 / span 2; align-self: end; }
 @media (max-width: 900px) {
-  .config-step__fields, .feature-grid--fields { grid-template-columns: 1fr; }
-  .feature-grid--fields .field:last-child { grid-column: auto; }
+  .config-step__fields { grid-template-columns: 1fr; }
 }
-
-.live-match-options { margin: 12px 0; padding: 11px; border: 1px solid #34343e; background: #0d0d11; }
-.live-match-options > .toggle { margin: 0; }
-.live-match-options .feature-grid { margin: 10px 0 7px; }
-.live-match-options .feature-grid.is-disabled { opacity: .5; }
-.live-match-options .hint { margin-bottom: 0; }
 
 /* ---------- Restrained application motion ---------- */
 :root {
