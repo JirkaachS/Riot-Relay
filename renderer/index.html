@@ -314,12 +314,16 @@
               <span class="badge badge--accent">identity-bound</span>
             </div>
 
-            <div class="config-workflow" id="config-workflow">
+            <div class="config-mode-selector field">
+              <label for="config-game">Game configuration</label>
+              <select id="config-game" class="select"><option value="valorant">VALORANT · cloud only</option><option value="league">League of Legends + TFT · local</option><option value="lor">Legends of Runeterra · local</option></select>
+            </div>
+
+            <div class="config-workflow" id="config-workflow" hidden>
               <section class="config-step" id="config-step-source">
                 <header><span class="config-step__number">1</span><div><strong>Capture the source</strong><small id="config-source-status">Not captured</small></div></header>
                 <p>Choose the local game profile and sign into the account whose preferences you want to copy.</p>
                 <div class="config-step__fields">
-                  <div class="field"><label for="config-game">Game configuration</label><select id="config-game" class="select"><option value="valorant">VALORANT</option><option value="league">League of Legends + TFT</option><option value="lor">Legends of Runeterra</option></select></div>
                   <div class="field" id="config-league-launch-wrap" hidden><label for="config-league-launch">Launch after apply</label><select id="config-league-launch" class="select"><option value="lol">League of Legends</option><option value="tft">Teamfight Tactics</option></select></div>
                   <div class="field"><label for="config-source">Source account</label><div class="config-account-picker"><select id="config-source" class="select"></select><button class="btn btn--ghost config-use-current" id="btn-config-source-current" type="button">Use signed-in account</button></div></div>
                 </div>

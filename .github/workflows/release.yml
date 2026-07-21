@@ -26,6 +26,9 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      - name: Generate multi-resolution Windows icon
+        shell: pwsh
+        run: ./build/make-icon.ps1
       - name: Build x64 NSIS release
         run: npm run dist:nsis
       - name: Build x64 MSI release
