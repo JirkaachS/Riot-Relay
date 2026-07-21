@@ -427,7 +427,7 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
     function Get-TrustedRiotPids {
       $root = [IO.Path]::GetFullPath([string]$creds.r).TrimEnd([char]92) + [char]92
       [uint32[]]@(
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Get-CimInstance Win32_Process -Filter "Name = 'RiotClientUx.exe' OR Name = 'Riot Client.exe'" -ErrorAction SilentlyContinue |
           Where-Object {
             $name = ([string]$_.Name).ToLowerInvariant()
             $exe = [string]$_.ExecutablePath
@@ -454,15 +454,16 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
     }
 
     function Assert-TrustedRiotWindow([IntPtr]$handle) {
-      [uint32[]]$pids = @(Get-TrustedRiotPids)
-      $pid = [NativeInput]::ProcessId($handle)
-      if ($handle -eq [IntPtr]::Zero -or -not ($pids -contains $pid)) {
+      [uint32[]]$trustedProcessIds = @(Get-TrustedRiotPids)
+      $windowProcessId = [NativeInput]::ProcessId($handle)
+      if ($handle -eq [IntPtr]::Zero -or -not ($trustedProcessIds -contains $windowProcessId)) {
         throw 'LOGIN_WINDOW_CHANGED: the trusted Riot login window closed or was replaced'
       }
     }
 
     $h = [IntPtr]::Zero
     $stable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
+    $trustedObservedSince = $null; $windowDetected = $false
     for ($i = 0; $i -lt 80; $i++) {
       # Only accept Riot Chromium executables beneath the same installation
       # root as RiotClientServices. This excludes Riot Relay and unrelated
@@ -471,9 +472,21 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
       $candidate = [NativeInput]::FindRiotWindow($pids)
       if ($candidate -ne [IntPtr]::Zero) {
         $width = [NativeInput]::ClientWidth($candidate); $height = [NativeInput]::ClientHeight($candidate)
-        if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) { $stable++ } else { $stable = 0 }
+        if (-not $windowDetected) {
+          Write-Output '{"checkpoint":"WINDOW_DETECTED"}'
+          $windowDetected = $true
+        }
+        if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) {
+          $stable++
+        } else {
+          $stable = 0
+          $trustedObservedSince = [DateTime]::UtcNow
+        }
         $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
         if ($stable -ge 4) { $h = $candidate; break }
+      } else {
+        $stable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
+        $trustedObservedSince = $null
       }
       Start-Sleep -Milliseconds 500
     }
@@ -487,23 +500,30 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
     } | ConvertTo-Json -Compress | Write-Output
 
     # A top-level Chromium HWND appears before its form. Prefer the actual UIA
-    # edit-control signal when Riot exposes it; otherwise require the trusted
-    # window to remain unchanged for a conservative twelve-second hydration
-    # period. A fixed short sleep entered credentials into a blank splash view
-    # on slower production machines.
-    $formReady = $false; $readyStable = 0; $readySince = [DateTime]::UtcNow
-    $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
+    # edit-control signal when Riot exposes it; otherwise require eight seconds
+    # of continuous stability from the first trusted observation. Keeping that
+    # timestamp avoids restarting the hydration wait after window selection.
+    $formReady = $false; $readyStable = $stable
+    if ($null -eq $trustedObservedSince) { $trustedObservedSince = [DateTime]::UtcNow }
     for ($i = 0; $i -lt 60; $i++) {
       [uint32[]]$readyPids = @(Get-TrustedRiotPids)
       $candidate = [NativeInput]::FindRiotWindow($readyPids)
       if ($candidate -ne [IntPtr]::Zero) {
         $width = [NativeInput]::ClientWidth($candidate); $height = [NativeInput]::ClientHeight($candidate)
-        if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) { $readyStable++ } else { $readyStable = 0 }
+        if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) {
+          $readyStable++
+        } else {
+          $readyStable = 0
+          $trustedObservedSince = [DateTime]::UtcNow
+        }
         $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
-        $elapsed = ([DateTime]::UtcNow - $readySince).TotalMilliseconds
-        if ((Test-LoginControls $candidate) -or ($elapsed -ge 12000 -and $readyStable -ge 8)) {
+        $elapsed = ([DateTime]::UtcNow - $trustedObservedSince).TotalMilliseconds
+        if ((Test-LoginControls $candidate) -or ($elapsed -ge 8000 -and $readyStable -ge 8)) {
           $h = $candidate; $formReady = $true; break
         }
+      } else {
+        $readyStable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
+        $trustedObservedSince = $null
       }
       Start-Sleep -Milliseconds 500
     }
@@ -562,7 +582,7 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
       const event = JSON.parse(line);
       if (event && event.checkpoint) onDiagnostic(event);
     } catch { /* non-checkpoint output is parsed below */ }
-  });
+  }, 75000);
   try {
     const result = JSON.parse(output.split(/\r?\n/).filter(Boolean).pop());
     if (!result.ok) throw new Error(result.code || 'Native login input failed.');
@@ -782,8 +802,9 @@ async function switchAccount({
     const input = await autoLogin(username, password, client, (event) => {
       const labels = {
         HELPER_STARTED: 'Secure login helper started.',
-        WINDOW_SELECTED: 'Riot login window is ready.',
-        FORM_SETTLE_WAIT_COMPLETE: 'Riot login form finished loading.',
+        WINDOW_DETECTED: 'Trusted Riot window detected; waiting for the login form…',
+        WINDOW_SELECTED: 'Trusted Riot window is stable.',
+        FORM_SETTLE_WAIT_COMPLETE: 'Riot login form is ready.',
         FOREGROUND_ACQUIRED: 'Riot login form is active.',
         USERNAME_INPUT_INJECTED: 'Username entered securely.',
         PASSWORD_INPUT_INJECTED: 'Password entered securely.',

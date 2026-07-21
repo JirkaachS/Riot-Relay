@@ -143,16 +143,30 @@ class Vault {
         updatedAt: section.updatedAt || null,
       }];
     }).sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+    data.rosterSections.forEach((section, index) => { section.order = index; });
     const validSectionIds = new Set(data.rosterSections.map((section) => section.id));
     if (!Array.isArray(data.accounts)) data.accounts = [];
-    data.accounts = data.accounts.map((account) => account && typeof account === 'object'
-      ? {
+    data.accounts = data.accounts.flatMap((account, index) => account && typeof account === 'object'
+      ? [{
         ...account,
         sectionId: validSectionIds.has(String(account.sectionId || '')) ? String(account.sectionId) : null,
+        rosterOrder: Number.isSafeInteger(Number(account.rosterOrder)) && Number(account.rosterOrder) >= 0
+          ? Number(account.rosterOrder) : Number.MAX_SAFE_INTEGER,
         rosterHidden: account.rosterHidden === true,
         stats: sanitizeStats(account.stats),
-      }
-      : account);
+        _legacyRosterIndex: index,
+      }]
+      : []);
+    const bucketIds = [null, ...data.rosterSections.map((section) => section.id)];
+    for (const sectionId of bucketIds) {
+      data.accounts.filter((account) => account.sectionId === sectionId)
+        .sort((left, right) => left.rosterOrder - right.rosterOrder
+          || left._legacyRosterIndex - right._legacyRosterIndex
+          || String(left.label || left.username || '').localeCompare(String(right.label || right.username || ''))
+          || String(left.id || '').localeCompare(String(right.id || '')))
+        .forEach((account, index) => { account.rosterOrder = index; });
+    }
+    data.accounts.forEach((account) => { delete account._legacyRosterIndex; });
     if (!data.capabilities || typeof data.capabilities !== 'object') data.capabilities = {};
     const legacyMode = data.capabilities.osKeyStorage === true ? 'os' : 'disabled';
     const requestedMode = String(data.capabilities.osKeyMode || legacyMode);
@@ -398,6 +412,20 @@ class Vault {
     return this.data.accounts.map((a) => ({ ...a, password: undefined, hasPassword: !!a.password }));
   }
 
+  _orderedRosterBucket(sectionId, excludingId = null) {
+    return this.data.accounts.filter((account) => account.sectionId === sectionId && account.id !== excludingId)
+      .sort((left, right) => Number(left.rosterOrder) - Number(right.rosterOrder)
+        || String(left.label || left.username || '').localeCompare(String(right.label || right.username || ''))
+        || String(left.id || '').localeCompare(String(right.id || '')));
+  }
+
+  _compactRosterBuckets(sectionIds) {
+    const ids = sectionIds ? [...new Set(sectionIds)] : [null, ...this.data.rosterSections.map((section) => section.id)];
+    for (const sectionId of ids) {
+      this._orderedRosterBucket(sectionId).forEach((account, index) => { account.rosterOrder = index; });
+    }
+  }
+
   getAccountSecret(id) {
     const a = this.data.accounts.find((x) => x.id === id);
     return a ? a.password || '' : '';
@@ -411,32 +439,35 @@ class Vault {
     account = { ...account, sectionId };
     const now = new Date().toISOString();
     const idx = this.data.accounts.findIndex((a) => a.id === account.id);
+    let previousSectionId = null;
     if (idx >= 0) {
       const prev = this.data.accounts[idx];
-      // Keep existing password if the incoming one is blank (edit without retype).
+      previousSectionId = prev.sectionId;
       const password = account.password ? account.password : prev.password;
-      // Spread `account` first, then re-pin id/password so an incoming
-      // `id: undefined` can never clobber the real identifier.
-      this.data.accounts[idx] = { ...prev, ...account, id: prev.id, password, updatedAt: now };
+      const rosterOrder = prev.sectionId === sectionId
+        ? prev.rosterOrder
+        : this._orderedRosterBucket(sectionId, prev.id).length;
+      this.data.accounts[idx] = { ...prev, ...account, id: prev.id, password, rosterOrder, updatedAt: now };
     } else {
       const id = account.id || crypto.randomUUID();
-      // Spread `account` first so a stray `id: undefined` from the renderer
-      // doesn't overwrite the freshly generated id (which caused every new
-      // account to collapse onto the previous one).
       this.data.accounts.push({
         createdAt: now,
         updatedAt: now,
         favorite: false,
         ...account,
         id,
+        rosterOrder: this._orderedRosterBucket(sectionId).length,
       });
     }
+    this._compactRosterBuckets(idx >= 0 ? [previousSectionId, sectionId] : [sectionId]);
     this._persist();
     return this.listAccounts();
   }
 
   removeAccount(id) {
+    const account = this.data.accounts.find((item) => item.id === id);
     this.data.accounts = this.data.accounts.filter((a) => a.id !== id);
+    if (account) this._compactRosterBuckets([account.sectionId]);
     this._persist();
     return this.listAccounts();
   }
@@ -490,13 +521,55 @@ class Vault {
     this._persist();
   }
 
+  reorderRosterSections(orderedIds) {
+    if (!Array.isArray(orderedIds)) throw new Error('Roster section order must be an array.');
+    const ids = orderedIds.map((id) => String(id || ''));
+    const currentIds = this.data.rosterSections.map((section) => section.id);
+    if (ids.length !== currentIds.length || new Set(ids).size !== ids.length
+      || ids.some((id) => !currentIds.includes(id))) {
+      throw new Error('Roster section order must be an exact duplicate-free permutation.');
+    }
+    const order = new Map(ids.map((id, index) => [id, index]));
+    this.data.rosterSections.sort((left, right) => order.get(left.id) - order.get(right.id));
+    this.data.rosterSections.forEach((section, index) => { section.order = index; });
+    this._persist();
+  }
+
+  moveAccountToRosterSection(accountId, sectionIdOrNull, targetIndex) {
+    const account = this.data.accounts.find((item) => item.id === String(accountId || ''));
+    if (!account) throw new Error('Account not found.');
+    const sectionId = sectionIdOrNull === null || sectionIdOrNull === undefined || sectionIdOrNull === ''
+      ? null : String(sectionIdOrNull);
+    if (sectionId && !this.data.rosterSections.some((section) => section.id === sectionId)) {
+      throw new Error('Roster section not found.');
+    }
+    if (targetIndex !== undefined && (!Number.isSafeInteger(targetIndex) || targetIndex < 0)) {
+      throw new Error('Target roster index must be a non-negative integer.');
+    }
+    const previousSectionId = account.sectionId;
+    const target = this._orderedRosterBucket(sectionId, account.id);
+    const index = targetIndex === undefined ? target.length : Math.min(targetIndex, target.length);
+    target.splice(index, 0, account);
+    account.sectionId = sectionId;
+    account.updatedAt = new Date().toISOString();
+    target.forEach((item, order) => { item.rosterOrder = order; });
+    if (previousSectionId !== sectionId) this._compactRosterBuckets([previousSectionId]);
+    this._persist();
+  }
+
   removeRosterSection(id) {
     if (!this.data.rosterSections.some((section) => section.id === id)) throw new Error('Roster section not found.');
+    const unsectioned = this._orderedRosterBucket(null);
+    const moved = this._orderedRosterBucket(id);
     this.data.rosterSections = this.data.rosterSections.filter((section) => section.id !== id);
+    this.data.rosterSections.forEach((section, index) => { section.order = index; });
     const now = new Date().toISOString();
-    this.data.accounts = this.data.accounts.map((account) => account.sectionId === id
-      ? { ...account, sectionId: null, updatedAt: now }
-      : account);
+    moved.forEach((account, index) => {
+      account.sectionId = null;
+      account.rosterOrder = unsectioned.length + index;
+      account.updatedAt = now;
+    });
+    this._compactRosterBuckets([null]);
     this._persist();
   }
 

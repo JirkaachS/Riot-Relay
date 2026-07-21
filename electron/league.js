@@ -367,9 +367,7 @@ function providerSeasonId(row) {
 
 function trustedProviderSeasonId(value) {
   const season = providerText(value, 128);
-  if (/^s?20\d{2}(?:[-_. ](?:split|season)[-_. ]?\d{1,2})?$/i.test(season)) return season;
-  if (/^(?:season|set|act)[-_. ]?[a-z0-9][a-z0-9 ._-]{0,31}$/i.test(season)) return season;
-  return '';
+  return /^(?=.{1,64}$)(?=.*\d)[a-z0-9][a-z0-9 ._-]*$/i.test(season) ? season : '';
 }
 
 function providerSeasonOrder(value) {
@@ -892,11 +890,12 @@ function boundedProviderObjects(root) {
   return objects;
 }
 
-const TFT_RANK_CONTAINER_KEYS = [
+const TFT_RANK_CONTAINER_KEYS = [...new Set([
   'league_stats', 'leagueStats', 'ranked_stats', 'rankedStats', 'queue_stats', 'queueStats', 'queues', 'queueMap',
-  'ranking', 'rankings', 'entry', 'entries', 'previous_seasons', 'previousSeasons',
+  'ranking', 'rankings', 'entry', 'entries',
+  ...PROVIDER_HISTORY_KEYS,
   'RANKED_TFT', 'RANKED_TFT_DOUBLE_UP',
-];
+])];
 
 function hasTftRankContainer(row) {
   if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
@@ -942,7 +941,8 @@ function tftQueuePayload(records, queue, expectedPuuid) {
   const bounded = records.slice(0, PROVIDER_ROW_LIMIT);
   checkedProviderPuuid(bounded, expectedPuuid, 'OP.GG TFT');
   const explicitCurrent = bounded.filter((row) => providerBoolean(row, ['is_current', 'isCurrent', 'current']) === true);
-  const eligible = explicitCurrent.length ? explicitCurrent : bounded.filter((row) => !historicalProviderRecord(row));
+  const eligible = explicitCurrent.length ? explicitCurrent : bounded.filter((row) => !historicalProviderRecord(row)
+    && !trustedProviderSeasonId(providerSeasonId(row)));
   const rankedEligible = eligible.map((row) => ({ row, rank: providerRankedQueue(row, queue) })).filter((value) => value.rank);
   const compatibleCurrentRank = (left, right) => left.tier === right.tier
     && (!left.division || !right.division || left.division === right.division)
@@ -966,7 +966,7 @@ function tftQueuePayload(records, queue, expectedPuuid) {
   const historyRows = providerHistoryRows(bounded);
   for (const row of bounded) {
     const seasonId = providerSeasonId(row);
-    if (historicalProviderRecord(row) || (currentSeasonId && seasonId && seasonId !== currentSeasonId)) historyRows.push(row);
+    if (historicalProviderRecord(row) || (seasonId && (!currentSeasonId || seasonId !== currentSeasonId))) historyRows.push(row);
   }
   return { current, pastSeasons: normalizedPastSeasons(historyRows, queue) };
 }
