@@ -34,7 +34,7 @@ const state = {
   activity: [],
   rankIcons: {},
   settings: {},
-  updates: { status: 'idle', currentVersion: '1.3.4', availableVersion: null, progress: 0 },
+  updates: { status: 'idle', currentVersion: '1.3.5', availableVersion: null, progress: 0 },
   startup: { supported: false, enabled: false, reason: 'Checking Windows startup registration…' },
   configProfiles: [],
   configProfilesError: null,
@@ -2183,6 +2183,11 @@ function setConfigStepState(element, stateName) {
 }
 function renderConfigProfileStatus() {
   const namespace = configNamespace();
+  const isCloud = namespace === 'valorant';
+  const cloud = $('#config-cloud');
+  $('#config-workflow').hidden = isCloud;
+  if (cloud) cloud.hidden = !isCloud;
+  $('#config-league-launch-wrap').hidden = namespace !== 'league';
   const sourceId = $('#config-source').value;
   const targetId = $('#config-target').value;
   const source = state.configProfiles.find((item) => item.accountId === sourceId);
@@ -2193,7 +2198,6 @@ function renderConfigProfileStatus() {
   const differentAccounts = !!sourceId && !!targetId && sourceId !== targetId;
   const sourceLinked = source?.linked === true;
   const targetLinked = target?.linked === true;
-  const isCloud = namespace === 'valorant';
   const sourceReady = isCloud ? source?.cloudCaptured === true : !!(source && source.profiles && source.profiles[namespace]);
   const targetReady = isCloud ? targetLinked : !!(target && target.profiles && target.profiles[namespace]);
   const sourceInvalid = !isCloud && !!(source && source.profileErrors && source.profileErrors[namespace]);
@@ -2255,10 +2259,7 @@ function renderConfigProfileStatus() {
   $('#btn-config-auto').disabled = unavailable || !enoughLinkedAccounts || !differentAccounts || !sourceLinked || !targetLinked;
   $('#btn-config-remove').hidden = isCloud || !bound;
   $('#btn-config-remove').disabled = unavailable;
-  $('#config-league-launch-wrap').hidden = namespace !== 'league';
-  const cloud = $('#config-cloud');
   if (cloud) {
-    cloud.hidden = !isCloud;
     const activeId = activeConfigAccountId();
     // The captured source is whichever validated account blob is newest.
     const source = latestCloudSourceStatus();
@@ -2340,9 +2341,7 @@ $('#config-league-launch').addEventListener('change', renderConfigProfileStatus)
 $('#btn-config-source-current').addEventListener('click', () => useActiveConfigAccount('source'));
 $('#btn-config-target-current').addEventListener('click', () => useActiveConfigAccount('target'));
 $('#btn-config-capture-source').addEventListener('click', (event) => runConfigAction(event.currentTarget,
-  () => configNamespace() === 'valorant'
-    ? api.configs.captureCloud($('#config-source').value).then(unwrap)
-    : api.configs.capture($('#config-source').value, configNamespace()).then(unwrap),
+  () => api.configs.capture($('#config-source').value, configNamespace()).then(unwrap),
   'Source preferences captured while the selected PUUID was verified.'));
 $('#btn-config-capture-target').addEventListener('click', (event) => runConfigAction(event.currentTarget,
   () => api.configs.capture($('#config-target').value, $('#config-game').value).then(unwrap),
@@ -2350,13 +2349,7 @@ $('#btn-config-capture-target').addEventListener('click', (event) => runConfigAc
 $('#btn-config-migrate').addEventListener('click', (event) => runConfigAction(event.currentTarget,
   () => api.configs.migrate($('#config-source').value, $('#config-target').value, $('#config-game').value).then(unwrap),
   'Binding saved. No files were changed; use Apply and launch target.'));
-$('#btn-config-apply').addEventListener('click', async () => {
-  if (configNamespace() === 'valorant') {
-    await runConfigAction($('#btn-config-apply'),
-      () => api.configs.applyCloud($('#config-source').value).then(unwrap),
-      'VALORANT cloud settings applied and verified.');
-  } else await doSwitch($('#config-target').value, configLaunchGame());
-});
+$('#btn-config-apply').addEventListener('click', () => doSwitch($('#config-target').value, configLaunchGame()));
 $('#btn-config-auto').addEventListener('click', async (event) => {
   const button = event.currentTarget;
   const sourceId = $('#config-source').value;
@@ -2364,19 +2357,15 @@ $('#btn-config-auto').addEventListener('click', async (event) => {
   const namespace = configNamespace();
   button.disabled = true; button.classList.add('is-loading');
   try {
-    let result = await doSwitch(sourceId, namespace === 'valorant' ? 'valorant' : null);
+    let result = await doSwitch(sourceId);
     if (!result || result.verified !== true) throw new Error('Source account could not be verified.');
-    if (namespace === 'valorant') unwrap(await api.configs.captureCloud(sourceId));
-    else unwrap(await api.configs.capture(sourceId, namespace));
-    result = await doSwitch(targetId, namespace === 'valorant' ? 'valorant' : null);
+    unwrap(await api.configs.capture(sourceId, namespace));
+    result = await doSwitch(targetId);
     if (!result || result.verified !== true) throw new Error('Target account could not be verified.');
-    if (namespace === 'valorant') unwrap(await api.configs.applyCloud(sourceId));
-    else {
-      unwrap(await api.configs.capture(targetId, namespace));
-      unwrap(await api.configs.migrate(sourceId, targetId, namespace));
-      result = await doSwitch(targetId, configLaunchGame());
-      if (!result || result.verified !== true) throw new Error('Target configuration was prepared, but launch verification did not complete.');
-    }
+    unwrap(await api.configs.capture(targetId, namespace));
+    unwrap(await api.configs.migrate(sourceId, targetId, namespace));
+    result = await doSwitch(targetId, configLaunchGame());
+    if (!result || result.verified !== true) throw new Error('Target configuration was prepared, but launch verification did not complete.');
     toast('Seamless migration completed.', 'good');
   } catch (error) { logActivity(error.message, 'bad'); toast(error.message, 'bad'); }
   finally { button.classList.remove('is-loading'); await refreshConfigProfiles(); }

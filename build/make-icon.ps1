@@ -57,29 +57,53 @@ $g.FillEllipse($nodeBrush, 151, 174, 20, 20)
 $g.Dispose()
 $pngPath = Join-Path $here 'icon.png'
 $bmp.Save($pngPath, [System.Drawing.Imaging.ImageFormat]::Png)
+
+# Build a true multi-resolution ICO so Windows can select a native taskbar,
+# shortcut, tray, or high-DPI size instead of displaying Electron's fallback.
+$sizes = @(16, 20, 24, 32, 40, 48, 64, 128, 256)
+$images = @()
+foreach ($size in $sizes) {
+  if ($size -eq 256) {
+    $images += ,([System.IO.File]::ReadAllBytes($pngPath))
+    continue
+  }
+  $scaled = New-Object System.Drawing.Bitmap $size, $size
+  $sg = [System.Drawing.Graphics]::FromImage($scaled)
+  $sg.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+  $sg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $sg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+  $sg.DrawImage($bmp, 0, 0, $size, $size)
+  $stream = New-Object System.IO.MemoryStream
+  $scaled.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+  $images += ,($stream.ToArray())
+  $stream.Dispose(); $sg.Dispose(); $scaled.Dispose()
+}
 $bmp.Dispose()
 
-# Wrap the PNG into a single-image .ico; current Windows supports PNG entries.
-$png = [System.IO.File]::ReadAllBytes($pngPath)
 $icoPath = Join-Path $here 'icon.ico'
 $fs = [System.IO.File]::Create($icoPath)
 $bw = New-Object System.IO.BinaryWriter($fs)
 $bw.Write([UInt16]0)
 $bw.Write([UInt16]1)
-$bw.Write([UInt16]1)
-$bw.Write([Byte]0)
-$bw.Write([Byte]0)
-$bw.Write([Byte]0)
-$bw.Write([Byte]0)
-$bw.Write([UInt16]1)
-$bw.Write([UInt16]32)
-$bw.Write([UInt32]$png.Length)
-$bw.Write([UInt32]22)
-$bw.Write($png)
+$bw.Write([UInt16]$sizes.Count)
+$offset = 6 + (16 * $sizes.Count)
+for ($i = 0; $i -lt $sizes.Count; $i++) {
+  $dimension = if ($sizes[$i] -eq 256) { [Byte]0 } else { [Byte]$sizes[$i] }
+  $bw.Write($dimension)
+  $bw.Write($dimension)
+  $bw.Write([Byte]0)
+  $bw.Write([Byte]0)
+  $bw.Write([UInt16]1)
+  $bw.Write([UInt16]32)
+  $bw.Write([UInt32]$images[$i].Length)
+  $bw.Write([UInt32]$offset)
+  $offset += $images[$i].Length
+}
+foreach ($image in $images) { $bw.Write($image) }
 $bw.Flush(); $bw.Close(); $fs.Close()
 
 $bg.Dispose(); $bgBrush.Dispose(); $bgBorder.Dispose()
 $rear.Dispose(); $rearPen.Dispose(); $accentPen.Dispose()
 $front.Dispose(); $frontBrush.Dispose(); $frontPen.Dispose()
 $markPen.Dispose(); $nodeBrush.Dispose()
-Write-Host "ICON_OK $pngPath"
+Write-Host "ICON_OK $pngPath ($($sizes.Count) ICO sizes)"

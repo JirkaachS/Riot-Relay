@@ -20,6 +20,7 @@ files:
   - "!**/*.map"
 win:
   icon: build/icon.ico
+  executableName: Riot Relay
   legalTrademarks: Riot Relay is an unofficial community application and is not endorsed by Riot Games.
 publish:
   provider: github
@@ -31,7 +32,7 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: Riot Relay
   deleteAppDataOnUninstall: false

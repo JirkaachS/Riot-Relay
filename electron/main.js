@@ -382,6 +382,15 @@ function createWindow() {
       spellcheck: false,
     },
   });
+  if (process.platform === 'win32') {
+    mainWindow.setAppDetails({
+      appId: WINDOWS_APP_ID,
+      appIconPath: app.isPackaged ? process.execPath : path.join(__dirname, '..', 'build', 'icon.ico'),
+      appIconIndex: 0,
+      relaunchCommand: process.execPath,
+      relaunchDisplayName: APP_NAME,
+    });
+  }
 
   mainWindow.loadURL(`${rendererOrigin}/renderer/index.html`);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -451,7 +460,7 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;
-  app.setAppUserModelId('com.riotrelay.desktop');
+  app.setAppUserModelId(WINDOWS_APP_ID);
   const dir = app.getPath('userData');
   vault = new Vault(dir, safeStorage);
   riot = new RiotClient();
