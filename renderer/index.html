@@ -319,7 +319,8 @@
                 <header><span class="config-step__number">1</span><div><strong>Capture the source</strong><small id="config-source-status">Not captured</small></div></header>
                 <p>Choose the local game profile and sign into the account whose preferences you want to copy.</p>
                 <div class="config-step__fields">
-                  <div class="field"><label for="config-game">Local game profile</label><select id="config-game" class="select"><option value="lol">League of Legends</option><option value="tft">Teamfight Tactics</option><option value="lor">Legends of Runeterra</option></select></div>
+                  <div class="field"><label for="config-game">Game configuration</label><select id="config-game" class="select"><option value="valorant">VALORANT</option><option value="league">League of Legends + TFT</option><option value="lor">Legends of Runeterra</option></select></div>
+                  <div class="field" id="config-league-launch-wrap" hidden><label for="config-league-launch">Launch after apply</label><select id="config-league-launch" class="select"><option value="lol">League of Legends</option><option value="tft">Teamfight Tactics</option></select></div>
                   <div class="field"><label for="config-source">Source account</label><div class="config-account-picker"><select id="config-source" class="select"></select><button class="btn btn--ghost config-use-current" id="btn-config-source-current" type="button">Use signed-in account</button></div></div>
                 </div>
                 <button class="btn btn--ghost" id="btn-config-capture-source" type="button">Capture verified source</button>
@@ -344,6 +345,7 @@
                 <div class="settings-actions">
                   <button class="btn btn--primary" id="btn-config-migrate" type="button">Save binding</button>
                   <button class="btn btn--primary" id="btn-config-apply" type="button">Apply and launch target</button>
+                  <button class="btn btn--ghost" id="btn-config-auto" type="button">Run seamless migration</button>
                   <button class="btn btn--ghost" id="btn-config-remove" type="button" hidden>Remove binding</button>
                 </div>
               </section>

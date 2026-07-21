@@ -528,9 +528,7 @@ async function switchAccount({
   if (loginMode === 'native-required' && !instant && !password) {
     throw new Error('LOGIN_PASSWORD_MISSING: Edit this roster entry and save its password before switching.');
   }
-  if (loginMode !== 'native-required' && !instant) {
-    throw new Error('AUTO_LOGIN_DISABLED: Enable “Auto-fill credentials on switch” in Settings before switching.');
-  }
+  const manualLogin = loginMode !== 'native-required';
   const targetLabel = game && GAMES[game] ? GAMES[game].label : 'Riot Client';
   const stageProductLaunch = !!(game && typeof onBeforeGameLaunch === 'function');
   let configMigration = null;
@@ -587,8 +585,8 @@ async function switchAccount({
     if (preparation && preparation.instant === false) instant = false;
     await delay(400);
   }
-  if (!instant && loginMode !== 'native-required') {
-    throw new Error('AUTO_LOGIN_DISABLED: The saved session could not be restored and automatic login is disabled in Settings.');
+  if (!instant && manualLogin) {
+    onStep('Automatic credential entry is off. Sign in to the requested account in Riot Client; this switch will resume after exact identity verification…');
   }
 
   const initialTarget = stageProductLaunch ? 'Riot Client for identity verification' : targetLabel;
@@ -597,6 +595,36 @@ async function switchAccount({
   if (!stageProductLaunch && game) {
     launchRequested = initialLaunch.productRequested === true;
     launcherAccepted = initialLaunch.launcherAccepted === true;
+  }
+
+  if (!instant && manualLogin) {
+    const verificationAvailable = typeof verifyAccount === 'function';
+    const verification = verificationAvailable ? await verify('manual') : { status: 'timeout' };
+    const verified = verification.status === 'matched';
+    if (verified) await launchVerifiedProduct();
+    onStep(verified
+      ? 'Requested account verified; the automatic switch is continuing.'
+      : 'Manual sign-in was left open because the requested PUUID was not verified before the timeout.');
+    return {
+      instant: false,
+      fallback: false,
+      verified,
+      recoverable: !verified && verification.status !== 'mismatched',
+      awaitingUserVerification: !verified && verification.status !== 'mismatched',
+      verification,
+      verificationAvailable,
+      automationAttempted: false,
+      inputDelivered: false,
+      loginSubmitted: false,
+      staySignedInClicked: false,
+      manualRequired: !verified,
+      reason: verified ? undefined : 'Complete sign-in to the requested account, then retry if Riot Relay did not resume automatically.',
+      launchedGame,
+      launchRequested,
+      launcherAccepted,
+      launchVerified,
+      configMigration,
+    };
   }
 
   let fallback = false;
