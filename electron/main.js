@@ -85,6 +85,12 @@ function configureUserData() {
 }
 configureUserData();
 
+// Set the Windows application identity before Electron creates any windows or
+// taskbar registrations. Late assignment can leave the running window grouped
+// under Electron instead of the packaged Riot Relay shortcut.
+const WINDOWS_APP_ID = 'com.riotrelay.desktop';
+if (process.platform === 'win32') app.setAppUserModelId(WINDOWS_APP_ID);
+
 const openDevTools = process.argv.includes('--devtools');
 
 let mainWindow = null;
@@ -95,6 +101,7 @@ let lastTrayNotificationAt = 0;
 let rendererServer = null;
 let rendererOrigin = '';
 let isQuitting = false;
+let minimizeToTaskbarPending = false;
 let vault = null;
 let riot = null;
 let catalog = null;
@@ -344,6 +351,15 @@ function minimizeMainWindow() {
   else mainWindow.minimize();
 }
 
+function minimizeMainWindowToTaskbar() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  minimizeToTaskbarPending = true;
+  mainWindow.setSkipTaskbar(false);
+  mainWindow.show();
+  mainWindow.minimize();
+  setTimeout(() => { minimizeToTaskbarPending = false; }, 1000).unref();
+}
+
 function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     focusMainWindow();
@@ -392,6 +408,10 @@ function createWindow() {
 
 
   mainWindow.on('minimize', (event) => {
+    if (minimizeToTaskbarPending) {
+      minimizeToTaskbarPending = false;
+      return;
+    }
     if (!isQuitting && trayEnabled()) {
       event.preventDefault();
       // Native taskbar minimize can flip isVisible() before this event reaches
@@ -1482,18 +1502,19 @@ async function verifyActiveAccount(account, timeoutMs = 30000, allowUserVerifica
       // login form. Repeated samples avoid treating normal startup as an auth
       // failure while the client is still coming up.
       unauthenticatedSamples = riot.isRunning() ? unauthenticatedSamples + 1 : 0;
-      const requiredSamples = allowUserVerification ? 8 : 12;
-      if (unauthenticatedSamples >= requiredSamples) {
-        return allowUserVerification
-          ? {
-            status: 'authentication-not-confirmed',
-            reason: 'Riot did not authenticate. Verify the saved username/password or complete Riot’s verification challenge.',
-          }
-          : { status: 'unauthenticated' };
+      const requiredSamples = 12;
+      if (!allowUserVerification && unauthenticatedSamples >= requiredSamples) {
+        return { status: 'unauthenticated' };
       }
     }
     const waitMs = Math.min(1000, Math.max(0, deadline - Date.now()));
     if (waitMs) await wait(waitMs);
+  }
+  if (allowUserVerification && !lastLive && riot.isRunning()) {
+    return {
+      status: 'authentication-not-confirmed',
+      reason: 'Riot did not authenticate before the continuation timeout. Verify the saved credentials or complete Riot’s verification challenge.',
+    };
   }
   if (!lastLive && riot.isRunning()) return { status: 'unauthenticated' };
   return { status: 'timeout', live: lastLive || undefined };
@@ -1932,8 +1953,8 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
       instant,
       verifyAccount: acc.puuid ? ({ phase } = {}) => verifyActiveAccount(
         acc,
-        phase === 'post-login' ? 45000 : 30000,
-        phase === 'post-login',
+        phase === 'manual' || phase === 'continuation' ? 180000 : phase === 'post-login' ? 45000 : 30000,
+        phase === 'manual' || phase === 'continuation' || phase === 'post-login',
       ) : null,
       onBeforeLaunch: async (step) => {
         if (instant) {
@@ -2064,7 +2085,7 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
   // After a verified switch, only minimize to the taskbar. Hiding to the tray
   // made the app appear to vanish; the window must remain easily recoverable.
   if (settings.minimizeOnSwitch && mainWindow && result.verified === true) {
-    try { mainWindow.minimize(); } catch { /* window may be gone */ }
+    try { minimizeMainWindowToTaskbar(); } catch { /* window may be gone */ }
   }
   return result;
 }));
