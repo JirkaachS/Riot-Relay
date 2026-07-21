@@ -34,17 +34,49 @@ const state = {
   activity: [],
   rankIcons: {},
   settings: {},
-  updates: { status: 'idle', currentVersion: '1.3.2', availableVersion: null, progress: 0 },
+  updates: { status: 'idle', currentVersion: '1.3.3', availableVersion: null, progress: 0 },
+  startup: { supported: false, enabled: false, reason: 'Checking Windows startup registration…' },
+  discord: { enabled: false, connected: false, configured: false, preview: null, lastError: null },
+  configProfiles: [],
+  configProfilesError: null,
+  configRoles: { intentional: false },
+  motion: { seenAccountIds: new Set() },
   inventory: null,
   games: [{ id: 'valorant', label: 'VALORANT' }],
-  inv: { section: 'Skin', exportSel: new Set(['Skin']), search: '', tier: '', accSearch: '', game: 'valorant' },
-  chat: { identity: null, friends: [], selectedId: null, messages: [], search: '', timer: null, loading: false, generation: 0 },
+  inv: { section: 'Skin', exportSel: new Set(['Skin']), search: '', tier: '', accSearch: '', game: 'valorant', entranceSeen: new Set() },
+  chat: {
+    identity: null, friends: [], selectedId: null, messages: [], search: '', filter: 'all', sort: 'unread', drafts: new Map(), timer: null, loading: false, generation: 0,
+    inboxIdentityHash: null, inboxBaseline: false, seenIncomingIds: new Set(), unreadByConversation: new Map(),
+  },
 };
 
 const fmt = (n) => Number(n || 0).toLocaleString('en-US');
 const displayLogin = (value) => state.settings.hideLoginNames ? '••••••••' : String(value || '—');
 const displayRiotId = (value) => state.settings.hideDisplayNames ? 'Hidden Riot ID' : String(value || '');
 const ownIdentity = (value, fallback = 'the verified account') => displayRiotId(value) || fallback;
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+function showBootScreen(message = 'Loading secure workspace…') {
+  const screen = $('#boot-screen');
+  if (!screen) return;
+  screen.hidden = false;
+  screen.classList.remove('is-leaving');
+  const status = $('#boot-status');
+  if (status) status.textContent = message;
+}
+function dismissBootScreen() {
+  const screen = $('#boot-screen');
+  if (!screen || screen.hidden || screen.classList.contains('is-leaving')) return;
+  screen.classList.add('is-leaving');
+  const finish = () => { screen.hidden = true; };
+  screen.addEventListener('transitionend', finish, { once: true });
+  setTimeout(finish, reducedMotion.matches ? 0 : 240);
+}
+const nextPaint = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+async function finishBootScreen() {
+  await nextPaint();
+  dismissBootScreen();
+}
 
 /* ---------------- Toasts ---------------- */
 function toast(message, kind = '') {
@@ -56,8 +88,8 @@ function toast(message, kind = '') {
   el.innerHTML = `<span class="toast__icon">${ic(iconName, 15)}</span><span class="toast__msg"></span>`;
   el.querySelector('.toast__msg').textContent = short;
   $('#toasts').appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateX(20px)'; }, 4200);
-  setTimeout(() => el.remove(), 4600);
+  setTimeout(() => el.classList.add('is-leaving'), 4200);
+  setTimeout(() => el.remove(), reducedMotion.matches ? 4210 : 4440);
 }
 function logActivity(message, kind = 'info') {
   state.activity.unshift({ at: new Date(), message: String(message || ''), kind });
@@ -71,6 +103,34 @@ function logActivity(message, kind = 'info') {
       <span>${escapeHtml(entry.message)}</span>
     </div>`).join('') || '<div class="activity-empty">No activity yet.</div>';
 }
+const CONFIG_ACTIVITY_LABELS = Object.freeze({
+  started: 'started',
+  'identity-verified': 'exact signed-in identity verified',
+  'identity-verified-before-write': 'exact target identity reverified before write',
+  'identity-reverified': 'exact signed-in identity reverified after read-back',
+  'settings-read': 'settings document read',
+  'target-identified': 'signed-in target identified',
+  'target-settings-read': 'target settings read for backup',
+  'backup-retained': 'target backup saved and retained',
+  'backup-loaded': 'retained backup loaded',
+  'capture-saved': 'captured settings saved',
+  'endpoint-ready': 'Riot Client UX endpoint ready',
+  'route-proven': 'player-preferences route proven by GET',
+  'put-accepted': 'Riot Client accepted the settings write',
+  'readback-fetched': 'same-route read-back received',
+  'readback-mismatch': 'read-back did not match; backup remains retained',
+  'write-verified': 'same-route read-back verified',
+  completed: 'completed',
+  failed: 'failed',
+});
+api.configs.onActivity((activity) => {
+  if (!activity || !['capture', 'apply', 'restore'].includes(activity.operation)) return;
+  const label = CONFIG_ACTIVITY_LABELS[activity.stage];
+  if (!label) return;
+  const operation = activity.operation[0].toUpperCase() + activity.operation.slice(1);
+  const message = activity.stage === 'failed' ? `${operation} failed${activity.detail ? `: ${activity.detail}` : '.'}` : `${operation}: ${label}.`;
+  logActivity(message, activity.outcome === 'bad' ? 'bad' : activity.outcome === 'good' ? 'good' : 'info');
+});
 $('#activity-clear').addEventListener('click', () => {
   state.activity = [];
   $('#activity-count').textContent = '0';
@@ -92,18 +152,32 @@ const SIDES = { accounts: '#side-accounts', inventory: '#side-inventory', chat: 
 const TB = { accounts: '#tb-accounts', inventory: '#tb-inventory', chat: '#tb-chat', settings: '#tb-settings' };
 const TITLES = { accounts: 'Accounts', inventory: 'Inventory', chat: 'Chat', settings: 'Settings' };
 function showView(name) {
-  state.activeView = name;
-  $$('.railbtn[data-view]').forEach((b) => b.classList.toggle('is-active', b.dataset.view === name));
-  $$('.tab[data-view], .workspace-tab[data-view]').forEach((b) => {
-    const active = b.dataset.view === name;
-    b.classList.toggle('is-active', active);
-    if (b.matches('.workspace-tab')) b.setAttribute('aria-selected', String(active));
-  });
-  $$('.view').forEach((v) => v.classList.toggle('is-active', v.id === `view-${name}`));
-  Object.entries(SIDES).forEach(([k, sel]) => { $(sel).hidden = k !== name; });
-  Object.entries(TB).forEach(([k, sel]) => { $(sel).hidden = k !== name; });
-  $('#toolbar-title').textContent = TITLES[name];
-  if (name === 'chat') startChatPolling(); else stopChatPolling();
+  const changed = state.activeView !== name;
+  const apply = () => {
+    state.activeView = name;
+    $$('.railbtn[data-view]').forEach((b) => b.classList.toggle('is-active', b.dataset.view === name));
+    $$('.tab[data-view], .workspace-tab[data-view]').forEach((b) => {
+      const active = b.dataset.view === name;
+      b.classList.toggle('is-active', active);
+      if (b.matches('.workspace-tab')) b.setAttribute('aria-selected', String(active));
+    });
+    $$('.view').forEach((v) => v.classList.toggle('is-active', v.id === `view-${name}`));
+    Object.entries(SIDES).forEach(([k, sel]) => { $(sel).hidden = k !== name; });
+    Object.entries(TB).forEach(([k, sel]) => { $(sel).hidden = k !== name; });
+    $('#toolbar-title').textContent = TITLES[name];
+    if (name === 'chat') {
+      if (state.chat.selectedId) {
+        clearConversationUnread(state.chat.selectedId);
+        renderChatFriends();
+      }
+      startChatPolling();
+    }
+  };
+  if (changed && typeof document.startViewTransition === 'function' && !reducedMotion.matches) {
+    document.startViewTransition(apply);
+  } else {
+    apply();
+  }
 }
 $$('.railbtn[data-view], .tab[data-view], .workspace-tab[data-view]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
 
@@ -111,6 +185,14 @@ $$('.railbtn[data-view], .tab[data-view], .workspace-tab[data-view]').forEach((b
 function stopChatPolling() {
   if (state.chat.timer) clearInterval(state.chat.timer);
   state.chat.timer = null;
+}
+function resetChatInbox(identityHash = null) {
+  state.chat.inboxIdentityHash = identityHash;
+  state.chat.inboxBaseline = false;
+  state.chat.seenIncomingIds = new Set();
+  state.chat.unreadByConversation = new Map();
+  state.chat.drafts = new Map();
+  updateChatUnreadBadges();
 }
 function clearChatState() {
   stopChatPolling();
@@ -120,50 +202,232 @@ function clearChatState() {
   state.chat.friends = [];
   state.chat.selectedId = null;
   state.chat.messages = [];
+  state.chat.drafts = new Map();
+  resetChatInbox();
   $('#chat-identity').textContent = 'Riot Client not connected';
   $('#chat-friends').innerHTML = '';
   $('#chat-workspace').hidden = true;
   $('#chat-empty').hidden = false;
   $('#chat-messages').innerHTML = '';
+  $('#chat-title').textContent = 'Conversation';
+  $('#chat-presence').textContent = 'Current Riot session';
+  $('#chat-head-avatar').innerHTML = '?';
 }
 function chatAvailability(value) {
   const availability = String(value || 'offline').toLowerCase();
   return ['chat', 'online', 'away', 'mobile', 'dnd'].includes(availability) ? availability : 'offline';
 }
+function chatAvailabilityLabel(value) {
+  return { chat: 'Online', online: 'Online', away: 'Away', mobile: 'Mobile', dnd: 'Do not disturb', offline: 'Offline' }[chatAvailability(value)];
+}
+function resizeChatComposer() {
+  const input = $('#chat-message');
+  input.style.height = 'auto';
+  input.style.height = `${Math.min(120, Math.max(31, input.scrollHeight))}px`;
+  $('#chat-message-count').textContent = `${input.value.length} / 1000`;
+}
+function saveChatDraft() {
+  if (!state.chat.selectedId) return;
+  const value = $('#chat-message').value;
+  if (value) state.chat.drafts.set(state.chat.selectedId, value);
+  else state.chat.drafts.delete(state.chat.selectedId);
+}
+function restoreChatDraft() {
+  $('#chat-message').value = state.chat.selectedId ? state.chat.drafts.get(state.chat.selectedId) || '' : '';
+  resizeChatComposer();
+}
+function boundedBadge(count) { return count > 99 ? '99+' : String(count); }
+function updateChatUnreadBadges() {
+  const total = [...state.chat.unreadByConversation.values()].reduce((sum, count) => sum + count, 0);
+  const accessible = total ? `Chat, ${total} unread message${total === 1 ? '' : 's'}` : 'Chat';
+  [$('#rail-chat-badge'), $('#workspace-chat-badge')].forEach((badge) => {
+    badge.hidden = !total;
+    badge.textContent = total ? boundedBadge(total) : '';
+  });
+  const railButton = $('#rail-chat');
+  const workspaceButton = $('#workspace-chat');
+  railButton.title = accessible;
+  railButton.setAttribute('aria-label', accessible);
+  workspaceButton.title = accessible;
+  workspaceButton.setAttribute('aria-label', accessible);
+}
+function rememberIncomingId(id) {
+  if (state.chat.seenIncomingIds.has(id)) return false;
+  state.chat.seenIncomingIds.add(id);
+  while (state.chat.seenIncomingIds.size > 1000) {
+    state.chat.seenIncomingIds.delete(state.chat.seenIncomingIds.values().next().value);
+  }
+  return true;
+}
+function applyChatInboxSnapshot(result) {
+  const identityHash = String(result.identity && result.identity.puuidHash || '');
+  if (identityHash !== state.chat.inboxIdentityHash) resetChatInbox(identityHash);
+  if (!result.inboxAvailable) return;
+  const markers = Array.isArray(result.incomingMessages) ? result.incomingMessages : [];
+  if (!state.chat.inboxBaseline) {
+    markers.forEach((marker) => {
+      if (/^[A-Za-z0-9_-]{32}$/.test(String(marker && marker.id || ''))) rememberIncomingId(marker.id);
+    });
+    state.chat.inboxBaseline = true;
+    return;
+  }
+  for (const marker of markers) {
+    const id = String(marker && marker.id || '');
+    const conversationId = String(marker && marker.conversationId || '');
+    if (!/^[A-Za-z0-9_-]{32}$/.test(id) || !/^[A-Za-z0-9_-]{32}$/.test(conversationId) || !rememberIncomingId(id)) continue;
+    const isOpen = state.activeView === 'chat' && state.chat.selectedId === conversationId;
+    if (!isOpen) state.chat.unreadByConversation.set(conversationId, (state.chat.unreadByConversation.get(conversationId) || 0) + 1);
+  }
+  updateChatUnreadBadges();
+}
+function clearConversationUnread(conversationId) {
+  if (state.chat.unreadByConversation.delete(conversationId)) updateChatUnreadBadges();
+}
+function chatFriendLabel(friend) {
+  return state.settings.hideDisplayNames ? 'Hidden Riot ID' : String(friend && friend.riotId || 'Friend');
+}
+function safeChatAvatarUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'https:' || url.search || url.hash) return '';
+    if (url.hostname === 'media.valorant-api.com'
+      && /^\/playercards\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/smallart\.png$/i.test(url.pathname)) return url.href;
+    if (url.hostname === 'raw.communitydragon.org'
+      && /^\/latest\/plugins\/rcp-be-lol-game-data\/global\/default\/v1\/profile-icons\/\d{1,9}\.jpg$/.test(url.pathname)) return url.href;
+    return '';
+  } catch { return ''; }
+}
+function chatAvatarContent(friend) {
+  const label = chatFriendLabel(friend);
+  const imageUrl = safeChatAvatarUrl(friend && friend.avatarUrl);
+  const image = imageUrl
+    ? `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(state.settings.hideDisplayNames ? 'Friend avatar' : `${label} avatar`)}" loading="lazy" decoding="async" />`
+    : '';
+  return `<span>${escapeHtml(initials(label))}</span>${image}`;
+}
+function bindChatAvatars(root = document) {
+  $$('.chat-avatar img', root).forEach((image) => image.addEventListener('error', () => { image.hidden = true; }, { once: true }));
+}
+function chatActivityLine(friend) {
+  const activity = friend && friend.activity;
+  if (!activity || typeof activity !== 'object') return String(friend && friend.game || '');
+  const parts = [activity.game];
+  if (activity.phase) parts.push(activity.phase);
+  if (activity.product === 'league' && activity.champion) parts.push(activity.champion);
+  if (activity.product === 'valorant' && activity.map) parts.push(activity.map);
+  if (activity.mode) parts.push(activity.mode);
+  return parts.filter((value, index, values) => value && values.indexOf(value) === index).join(' · ');
+}
+function renderChatHeader(friend) {
+  $('#chat-title').textContent = friend ? chatFriendLabel(friend) : 'Conversation';
+  $('#chat-presence').textContent = friend ? (chatActivityLine(friend) || 'No game activity') : 'Current Riot session';
+  $('#chat-availability').textContent = friend ? chatAvailabilityLabel(friend.availability) : '';
+  $('#chat-availability').hidden = !friend;
+  $('#chat-head-avatar').innerHTML = friend ? chatAvatarContent(friend) : '?';
+  const actions = $('#chat-profile-actions');
+  const labels = { tracker: 'Tracker', vtl: 'VTL', dpm: 'DPM', opgg: 'OP.GG', ugg: 'U.GG', deeplol: 'DeepLoL' };
+  const links = friend && friend.links && typeof friend.links === 'object' ? friend.links : {};
+  actions.innerHTML = Object.keys(labels).filter((provider) => typeof links[provider] === 'string')
+    .map((provider) => `<button type="button" data-chat-profile="${provider}" title="Open ${labels[provider]} profile">${labels[provider]}</button>`).join('');
+  actions.hidden = !actions.childElementCount;
+  bindChatAvatars($('#chat-head-avatar'));
+}
+$('#chat-profile-actions').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-chat-profile]');
+  if (!button || !state.chat.selectedId) return;
+  const friend = state.chat.friends.find((item) => item.id === state.chat.selectedId);
+  const target = friend && friend.links && friend.links[button.dataset.chatProfile];
+  if (!target) return;
+  button.disabled = true;
+  try { unwrap(await api.openExternal(target)); }
+  catch (error) { toast(error.message, 'warn'); }
+  finally { button.disabled = false; }
+});
 function renderChatFriends() {
   const search = state.chat.search.toLowerCase();
-  const friends = state.chat.friends.filter((friend) => !search || friend.riotId.toLowerCase().includes(search));
-  $('#chat-friends').innerHTML = friends.map((friend) => {
+  const visible = state.chat.friends.filter((friend) => {
+    if (search && !friend.riotId.toLowerCase().includes(search)) return false;
+    const unread = state.chat.unreadByConversation.get(friend.id) || 0;
+    if (state.chat.filter === 'online' && chatAvailability(friend.availability) === 'offline') return false;
+    if (state.chat.filter === 'unread' && !unread) return false;
+    return true;
+  });
+  const presenceOrder = { chat: 0, online: 0, dnd: 1, away: 2, mobile: 3, offline: 4 };
+  visible.sort((a, b) => {
+    const unreadA = state.chat.unreadByConversation.get(a.id) || 0;
+    const unreadB = state.chat.unreadByConversation.get(b.id) || 0;
+    if (state.chat.sort === 'unread' && unreadA !== unreadB) return unreadB - unreadA;
+    if (state.chat.sort !== 'name') {
+      const presence = (presenceOrder[chatAvailability(a.availability)] || 0) - (presenceOrder[chatAvailability(b.availability)] || 0);
+      if (presence) return presence;
+    }
+    return a.riotId.localeCompare(b.riotId) || a.id.localeCompare(b.id);
+  });
+  $('#chat-friends').innerHTML = visible.map((friend) => {
     const active = friend.id === state.chat.selectedId ? ' is-active' : '';
     const availability = chatAvailability(friend.availability);
-    return `<button class="chat-friend${active}" type="button" data-chat-friend="${escapeHtml(friend.id)}">
-      <span class="chat-friend__avatar">${escapeHtml(initials(friend.displayName))}<i class="chat-presence chat-presence--${escapeHtml(availability)}"></i></span>
-      <span class="chat-friend__meta"><strong>${escapeHtml(friend.riotId)}</strong><small>${escapeHtml(friend.game || availability)}</small></span>
+    const unread = state.chat.unreadByConversation.get(friend.id) || 0;
+    const hasDraft = !!state.chat.drafts.get(friend.id);
+    const label = chatFriendLabel(friend);
+    const accessible = `Open chat with ${label}${unread ? `, ${unread} unread message${unread === 1 ? '' : 's'}` : ''}${hasDraft ? ', draft saved' : ''}`;
+    return `<button class="chat-friend${active}" type="button" data-chat-friend="${escapeHtml(friend.id)}" aria-label="${escapeHtml(accessible)}" title="${escapeHtml(accessible)}">
+      <span class="chat-friend__avatar chat-avatar">${chatAvatarContent(friend)}<i class="chat-presence chat-presence--${escapeHtml(availability)}"></i></span>
+      <span class="chat-friend__meta"><strong>${escapeHtml(label)}</strong><small><span>${escapeHtml(chatActivityLine(friend) || 'No game activity')}</span><em>${escapeHtml(chatAvailabilityLabel(availability))}</em></small></span>
+      ${hasDraft ? '<span class="chat-draft" aria-hidden="true">Draft</span>' : ''}
+      ${unread ? `<span class="chat-unread chat-unread--friend" aria-hidden="true">${escapeHtml(boundedBadge(unread))}</span>` : ''}
     </button>`;
   }).join('') || '<div class="chat-list-empty">No friends match this view.</div>';
+  bindChatAvatars($('#chat-friends'));
   $$('#chat-friends [data-chat-friend]').forEach((button) => button.addEventListener('click', async () => {
+    saveChatDraft();
     state.chat.selectedId = button.dataset.chatFriend;
     state.chat.messages = [];
+    clearConversationUnread(state.chat.selectedId);
     renderChatFriends();
     const friend = state.chat.friends.find((item) => item.id === state.chat.selectedId);
-    $('#chat-title').textContent = friend ? friend.riotId : 'Conversation';
-    $('#chat-presence').textContent = friend ? `${friend.availability}${friend.game ? ` · ${friend.game}` : ''}` : 'Current Riot session';
+    renderChatHeader(friend);
+    restoreChatDraft();
     $('#chat-empty').hidden = true;
     $('#chat-workspace').hidden = false;
     await loadChatHistory(false);
     $('#chat-message').focus();
   }));
 }
+function chatDateKey(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+function chatDateLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Recent';
+  const today = new Date();
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  if (chatDateKey(date) === chatDateKey(today)) return 'Today';
+  if (chatDateKey(date) === chatDateKey(yesterday)) return 'Yesterday';
+  return date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}
 function renderChatMessages() {
   const pane = $('#chat-messages');
   const nearBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 60;
-  pane.innerHTML = state.chat.messages.map((message) => {
+  const messages = [...state.chat.messages].sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+  let previous = null;
+  const rows = [];
+  for (const message of messages) {
+    const currentDate = chatDateKey(message.timestamp);
+    if (!previous || currentDate !== chatDateKey(previous.timestamp)) rows.push(`<div class="chat-date"><span>${escapeHtml(chatDateLabel(message.timestamp))}</span></div>`);
+    const currentTime = new Date(message.timestamp || 0).getTime();
+    const previousTime = previous ? new Date(previous.timestamp || 0).getTime() : 0;
+    const grouped = previous && previous.isSelf === message.isSelf
+      && String(previous.authorId || previous.authorName) === String(message.authorId || message.authorName)
+      && currentDate === chatDateKey(previous.timestamp) && currentTime - previousTime >= 0 && currentTime - previousTime < 5 * 60 * 1000;
     const time = message.timestamp ? new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-    return `<article class="chat-message${message.isSelf ? ' is-self' : ''}">
-      <header><strong>${escapeHtml(message.isSelf ? 'You' : (message.authorName || 'Friend'))}</strong><time>${escapeHtml(time)}</time></header>
+    rows.push(`<article class="chat-message${message.isSelf ? ' is-self' : ''}${grouped ? ' is-grouped' : ''}">
+      <header><strong>${escapeHtml(message.isSelf ? 'You' : displayRiotId(message.authorName || 'Friend'))}</strong><time>${escapeHtml(time)}</time></header>
       <p>${escapeHtml(message.body).replace(/\n/g, '<br>')}</p>
-    </article>`;
-  }).join('') || '<div class="chat-history-empty">No recent messages in this conversation.</div>';
+    </article>`);
+    previous = message;
+  }
+  pane.innerHTML = rows.join('') || '<div class="chat-history-empty">No recent messages in this conversation.</div>';
   if (nearBottom) pane.scrollTop = pane.scrollHeight;
 }
 async function loadChatHistory(showErrors = true) {
@@ -180,23 +444,33 @@ async function loadChatHistory(showErrors = true) {
   }
 }
 async function refreshChatFriends(showErrors = true) {
-  if (state.chat.loading || state.activeView !== 'chat') return;
+  if (state.chat.loading) return;
   const generation = state.chat.generation;
   state.chat.loading = true;
   try {
     const result = unwrap(await api.chat.friends());
-    if (state.chat.generation !== generation || state.activeView !== 'chat') return;
+    if (state.chat.generation !== generation) return;
     state.chat.identity = result.identity;
     state.chat.friends = result.friends || [];
+    applyChatInboxSnapshot(result);
+    const friendIds = new Set(state.chat.friends.map((friend) => friend.id));
+    for (const conversationId of state.chat.unreadByConversation.keys()) {
+      if (!friendIds.has(conversationId)) state.chat.unreadByConversation.delete(conversationId);
+    }
+    updateChatUnreadBadges();
     $('#chat-identity').textContent = result.identity && result.identity.riotId ? `Active · ${displayRiotId(result.identity.riotId)}` : 'Current Riot account';
-    if (state.chat.selectedId && !state.chat.friends.some((friend) => friend.id === state.chat.selectedId)) {
+    if (state.chat.selectedId && !friendIds.has(state.chat.selectedId)) {
       state.chat.selectedId = null;
       state.chat.messages = [];
       $('#chat-workspace').hidden = true;
       $('#chat-empty').hidden = false;
+      renderChatHeader(null);
     }
     renderChatFriends();
-    if (state.chat.selectedId) await loadChatHistory(false);
+    if (state.chat.selectedId) {
+      renderChatHeader(state.chat.friends.find((friend) => friend.id === state.chat.selectedId));
+      if (state.activeView === 'chat') await loadChatHistory(false);
+    }
   } catch (error) {
     if (showErrors && state.chat.generation === generation) toast(error.message, 'warn');
     if (state.chat.generation === generation) $('#chat-identity').textContent = 'Riot chat unavailable';
@@ -210,6 +484,12 @@ function startChatPolling() {
   state.chat.timer = setInterval(() => refreshChatFriends(false), 5000);
 }
 $('#chat-search').addEventListener('input', (event) => { state.chat.search = event.target.value; renderChatFriends(); });
+$$('[data-chat-filter]').forEach((button) => button.addEventListener('click', () => {
+  state.chat.filter = button.dataset.chatFilter;
+  $$('[data-chat-filter]').forEach((item) => item.classList.toggle('is-active', item === button));
+  renderChatFriends();
+}));
+$('#chat-sort').addEventListener('change', (event) => { state.chat.sort = event.target.value; renderChatFriends(); });
 ['#btn-chat-refresh', '#btn-chat-refresh-side', '#btn-chat-connect'].forEach((selector) => $(selector).addEventListener('click', () => refreshChatFriends(true)));
 $('#chat-composer').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -222,16 +502,21 @@ $('#chat-composer').addEventListener('submit', async (event) => {
   try {
     unwrap(await api.chat.send(state.chat.selectedId, message));
     input.value = '';
+    state.chat.drafts.delete(state.chat.selectedId);
+    resizeChatComposer();
+    renderChatFriends();
     await loadChatHistory(true);
   } catch (error) { toast(error.message, 'bad'); }
   finally { button.disabled = false; }
 });
+$('#chat-message').addEventListener('input', () => { saveChatDraft(); resizeChatComposer(); renderChatFriends(); });
 $('#chat-message').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     $('#chat-composer').requestSubmit();
   }
 });
+resizeChatComposer();
 
 /* ---------------- Rank icons ---------------- */
 async function loadRankIcons() {
@@ -296,19 +581,31 @@ async function authenticateWindowsHello() {
 
 const lockOverlay = $('#lock-overlay');
 async function bootVault() {
-  const status = unwrap(await api.vault.status());
-  if (status.unlocked) { await afterUnlock(); return; }
-  if (!status.exists) { startOnboarding(); return; }   // first launch → walkthrough
-  lockOverlay.hidden = false;
-  $('#lock-title').textContent = 'Unlock Riot Relay';
-  $('#lock-sub').textContent = status.parkedKeyMode === 'hello'
-    ? 'Enter your master password, or verify with Windows Hello.'
-    : 'Enter your master password to decrypt the vault.';
-  $('#lock-submit').textContent = 'Unlock';
-  const parkedButton = $('#lock-parked');
-  parkedButton.hidden = !status.hasParkedKey;
-  parkedButton.textContent = status.parkedKeyMode === 'hello' ? 'Verify with Windows Hello' : 'Use OS-stored key';
-  $('#lock-password').focus();
+  try {
+    const status = unwrap(await api.vault.status());
+    if (status.unlocked) { await afterUnlock(); return; }
+    if (!status.exists) { startOnboarding(); return; }   // first launch → walkthrough
+    lockOverlay.hidden = false;
+    $('#lock-title').textContent = 'Unlock Riot Relay';
+    $('#lock-sub').textContent = status.parkedKeyMode === 'hello'
+      ? 'Enter your master password, or verify with Windows Hello.'
+      : 'Enter your master password to decrypt the vault.';
+    $('#lock-submit').textContent = 'Unlock';
+    const parkedButton = $('#lock-parked');
+    parkedButton.hidden = !status.hasParkedKey;
+    parkedButton.textContent = status.parkedKeyMode === 'hello' ? 'Verify with Windows Hello' : 'Use OS-stored key';
+    $('#lock-password').focus();
+  } catch (error) {
+    lockOverlay.hidden = false;
+    $('#lock-title').textContent = 'Riot Relay could not start';
+    $('#lock-sub').textContent = 'The secure vault could not be initialized. Restart Riot Relay and try again.';
+    $('#lock-error').textContent = error.message || 'Startup failed.';
+    $('#lock-error').hidden = false;
+    $('#lock-submit').disabled = true;
+    $('#lock-parked').hidden = true;
+  } finally {
+    requestAnimationFrame(() => dismissBootScreen());
+  }
 }
 
 /* ---------------- Onboarding walkthrough (first launch) ---------------- */
@@ -364,31 +661,171 @@ $('#ob-finish').addEventListener('click', async () => {
   } catch (e) { err.textContent = e.message; err.hidden = false; }
 });
 
-const FEATURE_TUTORIAL_VERSION = 2;
-const featureTour = { step: 0, count: 5 };
-function showTourStep(step) {
-  featureTour.step = Math.max(0, Math.min(featureTour.count - 1, step));
-  $$('#feature-tour [data-tour-step]').forEach((el) => el.classList.toggle('is-active', Number(el.dataset.tourStep) === featureTour.step));
-  $$('#tour-dots .onboard__dot').forEach((dot, index) => dot.classList.toggle('is-active', index === featureTour.step));
-  $('#tour-back').disabled = featureTour.step === 0;
-  $('#tour-next').hidden = featureTour.step === featureTour.count - 1;
-  $('#tour-finish').hidden = featureTour.step !== featureTour.count - 1;
+const FEATURE_TUTORIAL_VERSION = 3;
+const FEATURE_TOUR_STEPS = [
+  {
+    view: 'accounts', target: '.railbtn[data-view="accounts"]',
+    eyebrow: '1 · Accounts', title: 'Keep every Riot identity separate',
+    body: 'Use Accounts to add credentials, sync the active Riot session, inspect all three ranked profiles, and choose switch-only or an explicit switch-and-launch action.',
+    callout: 'PUUID verification remains authoritative before private data is attached.',
+  },
+  {
+    view: 'inventory', target: '.railbtn[data-view="inventory"]',
+    eyebrow: '2 · Inventory', title: 'Browse, value, and export collections',
+    body: 'Open Inventory to load supported VALORANT, League, and TFT collections, filter items, review real available prices, and create data or image exports.',
+  },
+  {
+    view: 'chat', target: '#rail-chat',
+    eyebrow: '3 · Chat', title: 'Chat follows only the active session',
+    body: 'The Chat workspace shows friends, activity, unread messages, drafts, and history for the currently authenticated Riot account. Inactive roster accounts are never mixed in.',
+  },
+  {
+    view: 'settings', settingGroup: 'configs', target: '.settingnav[data-group="configs"]',
+    eyebrow: '4 · Config migration', title: 'Move settings through a guided route',
+    body: 'Capture a verified source, capture a different target baseline, then review and enable the persistent source-to-target binding before an explicit game launch.',
+    callout: 'Credentials, sessions, logs, and arbitrary folders are never copied.',
+  },
+  {
+    view: 'settings', settingGroup: 'privacy', target: '.settingnav[data-group="privacy"]',
+    eyebrow: '5 · Privacy', title: 'Control what the interface reveals',
+    body: 'Login usernames and Riot display names can be masked independently without changing stored identity links, PUUID checks, or switch verification.',
+  },
+  {
+    view: 'settings', settingGroup: 'deceive', target: '#deceive-status', fallback: '.settingnav[data-group="deceive"]',
+    eyebrow: '6 · Deceive', title: 'Choose how friends see your presence',
+    body: 'Select Offline, Mobile, Away, or Online and decide whether game activity and parties are preserved. The helper contact is League-only; VALORANT uses these in-app controls.',
+    callout: 'Enable Deceive before the next Riot launch so the local proxy starts with the client.',
+  },
+];
+const featureTour = { step: 0, target: null, previousFocus: null };
+function setTourRect(element, left, top, width, height) {
+  Object.assign(element.style, { left: `${left}px`, top: `${top}px`, width: `${Math.max(0, width)}px`, height: `${Math.max(0, height)}px` });
 }
-function startFeatureTour() {
-  $('#tour-dots').innerHTML = Array.from({ length: featureTour.count }, () => '<div class="onboard__dot"></div>').join('');
-  $('#feature-tour').hidden = false;
-  showTourStep(0);
+function positionFeatureTour() {
+  const tour = $('#feature-tour');
+  const target = featureTour.target;
+  if (tour.hidden || !target) return;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const raw = target.getBoundingClientRect();
+  const padding = 6;
+  const left = Math.max(0, raw.left - padding);
+  const top = Math.max(0, raw.top - padding);
+  const right = Math.min(viewportWidth, raw.right + padding);
+  const bottom = Math.min(viewportHeight, raw.bottom + padding);
+  const width = Math.max(1, right - left);
+  const height = Math.max(1, bottom - top);
+  setTourRect($('[data-tour-scrim="top"]'), 0, 0, viewportWidth, top);
+  setTourRect($('[data-tour-scrim="left"]'), 0, top, left, height);
+  setTourRect($('[data-tour-scrim="right"]'), right, top, viewportWidth - right, height);
+  setTourRect($('[data-tour-scrim="bottom"]'), 0, bottom, viewportWidth, viewportHeight - bottom);
+  setTourRect($('#tour-spotlight'), left, top, width, height);
+
+  const card = $('#tour-card');
+  const cardRect = card.getBoundingClientRect();
+  const margin = 12;
+  const gap = 16;
+  let cardLeft;
+  let cardTop;
+  if (viewportWidth <= 760) {
+    cardLeft = margin;
+    cardTop = viewportHeight - cardRect.height - margin;
+  } else if (right + gap + cardRect.width <= viewportWidth - margin) {
+    cardLeft = right + gap;
+    cardTop = top;
+  } else if (left - gap - cardRect.width >= margin) {
+    cardLeft = left - gap - cardRect.width;
+    cardTop = top;
+  } else if (bottom + gap + cardRect.height <= viewportHeight - margin) {
+    cardLeft = Math.min(left, viewportWidth - cardRect.width - margin);
+    cardTop = bottom + gap;
+  } else {
+    cardLeft = Math.min(left, viewportWidth - cardRect.width - margin);
+    cardTop = top - gap - cardRect.height;
+  }
+  card.style.left = `${Math.max(margin, Math.min(cardLeft, viewportWidth - cardRect.width - margin))}px`;
+  card.style.top = `${Math.max(margin, Math.min(cardTop, viewportHeight - cardRect.height - margin))}px`;
+}
+function setTourAppInert(inert) {
+  ['.titlebar', '.body', '.statusbar'].forEach((selector) => {
+    const element = $(selector);
+    if (element) element.inert = inert;
+  });
+}
+async function showTourStep(step) {
+  featureTour.step = Math.max(0, Math.min(FEATURE_TOUR_STEPS.length - 1, step));
+  const current = FEATURE_TOUR_STEPS[featureTour.step];
+  showView(current.view);
+  if (current.settingGroup) showSettingGroup(current.settingGroup);
+  await nextPaint();
+  let target = $(current.target);
+  if (!target || target.hidden || !target.getClientRects().length) target = $(current.fallback || `.railbtn[data-view="${current.view}"]`);
+  if (!target) return;
+  target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+  await nextPaint();
+  featureTour.target = target;
+  $('#tour-eyebrow').textContent = current.eyebrow;
+  $('#tour-title').textContent = current.title;
+  $('#tour-body').textContent = current.body;
+  const callout = $('#tour-callout');
+  callout.textContent = current.callout || '';
+  callout.hidden = !current.callout;
+  $('#tour-counter').textContent = `${featureTour.step + 1} / ${FEATURE_TOUR_STEPS.length}`;
+  $$('#tour-dots .onboard__dot').forEach((dot, index) => {
+    const active = index === featureTour.step;
+    dot.classList.toggle('is-active', active);
+    if (active) dot.setAttribute('aria-current', 'step'); else dot.removeAttribute('aria-current');
+  });
+  $('#tour-back').disabled = featureTour.step === 0;
+  $('#tour-next').hidden = featureTour.step === FEATURE_TOUR_STEPS.length - 1;
+  $('#tour-finish').hidden = featureTour.step !== FEATURE_TOUR_STEPS.length - 1;
+  positionFeatureTour();
+  $('#tour-title').focus({ preventScroll: true });
+}
+async function startFeatureTour() {
+  const tour = $('#feature-tour');
+  if (!tour.hidden) return;
+  featureTour.previousFocus = document.activeElement;
+  $('#tour-dots').innerHTML = FEATURE_TOUR_STEPS.map((item, index) => `<button class="onboard__dot" type="button" data-tour-go="${index}" aria-label="Go to step ${index + 1}: ${escapeHtml(item.title)}"></button>`).join('');
+  tour.hidden = false;
+  setTourAppInert(true);
+  await showTourStep(0);
 }
 async function closeFeatureTour() {
-  $('#feature-tour').hidden = true;
+  const tour = $('#feature-tour');
+  if (tour.hidden) return;
+  tour.hidden = true;
+  featureTour.target = null;
+  setTourAppInert(false);
+  if (featureTour.previousFocus && featureTour.previousFocus.isConnected) featureTour.previousFocus.focus();
   try {
     await setSetting({ featureTutorialVersion: FEATURE_TUTORIAL_VERSION });
   } catch { /* tutorial completion is non-critical */ }
 }
+$('#tour-dots').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-tour-go]');
+  if (button) showTourStep(Number(button.dataset.tourGo));
+});
 $('#tour-back').addEventListener('click', () => showTourStep(featureTour.step - 1));
 $('#tour-next').addEventListener('click', () => showTourStep(featureTour.step + 1));
 $('#tour-finish').addEventListener('click', closeFeatureTour);
 $('#tour-skip').addEventListener('click', closeFeatureTour);
+window.addEventListener('resize', positionFeatureTour);
+document.addEventListener('scroll', positionFeatureTour, true);
+document.addEventListener('keydown', (event) => {
+  const tour = $('#feature-tour');
+  if (tour.hidden) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeFeatureTour(); return; }
+  if (event.key === 'ArrowLeft') { event.preventDefault(); showTourStep(featureTour.step - 1); return; }
+  if (event.key === 'ArrowRight') { event.preventDefault(); showTourStep(featureTour.step + 1); return; }
+  if (event.key !== 'Tab') return;
+  const focusable = $$('button:not([hidden]):not(:disabled), [tabindex="0"]', $('#tour-card'));
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
 
 async function submitLock() {
   const pw = $('#lock-password').value;
@@ -423,14 +860,23 @@ $('#btn-lock').addEventListener('click', async () => {
   await bootVault();
 });
 async function afterUnlock() {
-  await loadSettings();
-  await loadGames();
-  await refreshAccounts();
-  await loadRankIcons();
-  renderAccounts(); renderDetail();
+  showBootScreen('Loading settings…');
+  try {
+    await loadSettings();
+    $('#boot-status').textContent = 'Loading game workspaces…';
+    await loadGames();
+    $('#boot-status').textContent = 'Loading encrypted account roster…';
+    await refreshAccounts();
+    renderAccounts(); renderDetail();
+    $('#boot-status').textContent = 'Preparing Riot Relay…';
+  } finally {
+    await finishBootScreen();
+  }
+  startChatPolling();
   checkClientStatus();
+  loadRankIcons().then(() => { renderAccounts(); renderDetail(); });
   if (Number(state.settings.featureTutorialVersion || 0) < FEATURE_TUTORIAL_VERSION) {
-    setTimeout(startFeatureTour, 180);
+    setTimeout(startFeatureTour, 240);
   }
 }
 
@@ -452,69 +898,192 @@ function gameLabel(id) { const g = state.games.find((x) => x.id === id); return 
 function gameOptions(selected) {
   return state.games.map((g) => `<option value="${g.id}" ${g.id === selected ? 'selected' : ''}>${escapeHtml(g.label)}</option>`).join('');
 }
+function hasRankedValorantEvidence(rank) {
+  if (!rank || typeof rank !== 'object') return false;
+  const tier = Number(rank.tier);
+  const name = String(rank.tierName || rank.name || '').trim();
+  return (Number.isInteger(tier) && tier > 0) || (!!name && !/^unranked$/i.test(name));
+}
 function statsFor(account) {
   const isCurrent = state.currentSession && (state.currentSession.matchingAccountIds || []).includes(account.id);
-  return (isCurrent && state.stats) || account.stats || {
+  if (isCurrent && state.stats) {
+    const current = state.stats;
+    const liveRank = current.valorant && current.valorant.rank;
+    const storedRank = account.stats && account.stats.valorant && account.stats.valorant.rank;
+    const liveIsAuthoritativeUnranked = liveRank && liveRank.authoritativeUnranked === true;
+    if ((!liveRank || (!hasRankedValorantEvidence(liveRank) && !liveIsAuthoritativeUnranked)) && hasRankedValorantEvidence(storedRank)) {
+      return {
+        ...current,
+        valorant: {
+          ...(current.valorant || {}),
+          available: true,
+          rank: {
+            ...storedRank,
+            stale: true,
+            staleReason: 'Live VALORANT rank was unavailable; showing the last verified rank.',
+            authoritative: false,
+            authoritativeUnranked: false,
+          },
+        },
+      };
+    }
+    return current;
+  }
+  return account.stats || {
     valorant: { available: !!account.rankName, rank: { tier: account.rankTier, tierName: account.rankName, rr: account.rr }, level: account.level },
     league: { available: false, queues: [], error: 'Sync while League is open.' },
     tft: { available: false, queues: [], error: 'Sync while League is open.' },
   };
 }
 function queueName(queue) {
-  return ({ RANKED_SOLO_5x5: 'Solo / Duo', RANKED_FLEX_SR: 'Flex', RANKED_TFT: 'Ranked', RANKED_TFT_DOUBLE_UP: 'Double Up' })[queue] || queue;
+  return ({ RANKED_SOLO_5x5: 'Solo / Duo', RANKED_FLEX_SR: 'Ranked Flex', RANKED_TFT: 'Ranked', RANKED_TFT_DOUBLE_UP: 'Double Up' })[queue] || queue || 'Ranked';
 }
 const LEAGUE_RANK_COLORS = {
   IRON: '#7d706b', BRONZE: '#a96f4b', SILVER: '#8796a5', GOLD: '#c69a43', PLATINUM: '#4aa99b',
   EMERALD: '#3fbb78', DIAMOND: '#6b82d8', MASTER: '#9a62c7', GRANDMASTER: '#d4545b', CHALLENGER: '#d1ad5c',
   UNRANKED: '#555762',
 };
+const LEAGUE_EMBLEM_TIERS = new Set(['Iron', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Emerald', 'Diamond', 'Master', 'Grandmaster', 'Challenger']);
+const LEAGUE_EMBLEM_BASE = 'https://cdn.jsdelivr.net/gh/magisteriis/lol-icons-and-emblems@9168d1e/ranked-emblems';
+const LEAGUE_EMERALD_ASSET = './emerald-rank.png';
+function gameMark(game) {
+  const paths = {
+    valorant: '<path d="M3 4l10.2 18h5.1l-4.6-7.9L8.4 6.8 3 4Zm26 0L18.7 22h5.2l5.1-8.2V4Z"/>',
+    league: '<circle cx="16" cy="16" r="12"/><path d="M12 8v15h10l2-4h-7V8h-5Z"/>',
+    tft: '<path d="M4 8l5 4 7-7 7 7 5-4-3 14H7L4 8Zm5 17h14v3H9v-3Z"/>',
+  };
+  return `<span class="game-mark game-mark--${game}" aria-hidden="true"><svg viewBox="0 0 32 32">${paths[game] || ''}</svg></span>`;
+}
+function rankEmblem(tier, game, className = 'rank-emblem') {
+  const normalized = String(tier || 'UNRANKED').trim().toUpperCase();
+  const title = normalized.charAt(0) + normalized.slice(1).toLowerCase();
+  const supported = LEAGUE_EMBLEM_TIERS.has(title);
+  const fallback = normalized === 'UNRANKED' ? '—' : normalized.slice(0, 2);
+  const source = title === 'Emerald' ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/Emblem_${title}.png`;
+  return `<span class="${className} ${className}--${game}" style="--rank-accent:${LEAGUE_RANK_COLORS[normalized] || LEAGUE_RANK_COLORS.UNRANKED}" aria-hidden="true">
+    <span class="rank-emblem__fallback">${escapeHtml(fallback)}</span>
+    ${supported ? `<img data-rank-asset src="${source}" alt="" loading="lazy" decoding="async" />` : ''}
+  </span>`;
+}
+function bindRankAssets(root = document) {
+  $$('[data-rank-asset]', root).forEach((image) => image.addEventListener('error', () => { image.hidden = true; }, { once: true }));
+}
 function gameErrorMessage(game) {
   const message = String(game && game.error || 'Unavailable').trim();
   return /^(?:ReferenceError:\s*)?path is not defined$/i.test(message)
     ? 'Previous sync failed before data could be read. Sync again to retry.'
     : message;
 }
-function rankedRows(game) {
+function rankMetrics(row) {
+  const wins = row.wins == null ? null : Number(row.wins);
+  const losses = row.losses == null ? null : Number(row.losses);
+  const recordedGames = row.games == null ? null : Number(row.games);
+  const games = Number.isFinite(wins) && Number.isFinite(losses)
+    ? wins + losses
+    : Number.isFinite(recordedGames) && recordedGames >= 0 ? recordedGames : 0;
+  const winRate = games > 0 && Number.isFinite(wins) ? Math.round((wins / games) * 100) : null;
+  return [
+    row.lp != null ? `<b>${fmt(row.lp)} LP</b>` : row.rr != null ? `<b>${fmt(row.rr)} RR</b>` : null,
+    wins != null ? `<span><i>W</i>${fmt(wins)}</span>` : null,
+    losses != null ? `<span><i>L</i>${fmt(losses)}</span>` : null,
+    games ? `<span><i>G</i>${fmt(games)}</span>` : null,
+    winRate != null ? `<span><i>WR</i>${winRate}%</span>` : null,
+  ].filter(Boolean).join('');
+}
+function rankedRows(game, gameId) {
   if (!game || !game.available) return `<div class="game-stat__empty">${escapeHtml(gameErrorMessage(game))}</div>`;
-  if (!game.queues || !game.queues.length) return '<div class="game-stat__empty">No ranked placements found</div>';
-  return `<div class="rank-cards">${game.queues.map((q) => {
+  const queuePriority = ['RANKED_SOLO_5x5', 'RANKED_FLEX_SR', 'RANKED_TFT', 'RANKED_TFT_DOUBLE_UP'];
+  const queues = Array.isArray(game.queues)
+    ? game.queues.filter((queue) => queue && String(queue.tier || queue.tierName || '').trim())
+      .sort((left, right) => queuePriority.indexOf(left.queue) - queuePriority.indexOf(right.queue))
+    : [];
+  if (!queues.length) return '<div class="game-stat__empty">No ranked placements found for the current season.</div>';
+  return `<div class="rank-cards rank-cards--${gameId}">${queues.map((q, index) => {
     const tier = String(q.tier || 'UNRANKED').toUpperCase();
     const unranked = tier === 'UNRANKED';
     const division = unranked ? '' : String(q.division || '').toUpperCase();
-    const wins = q.wins == null ? null : Number(q.wins);
-    const losses = q.losses == null ? null : Number(q.losses);
-    const games = Number.isFinite(wins) && Number.isFinite(losses) ? wins + losses : 0;
-    const winRate = games > 0 ? Math.round((wins / games) * 100) : null;
-    const metrics = [
-      q.lp != null ? `<b>${fmt(q.lp)} LP</b>` : null,
-      wins != null ? `<span><i>W</i>${fmt(wins)}</span>` : null,
-      losses != null ? `<span><i>L</i>${fmt(losses)}</span>` : null,
-      winRate != null ? `<span><i>WR</i>${winRate}%</span>` : null,
-    ].filter(Boolean).join('');
-    const mark = unranked ? '—' : tier.slice(0, 1);
-    return `<div class="rank-card" style="--rank-accent:${LEAGUE_RANK_COLORS[tier] || LEAGUE_RANK_COLORS.UNRANKED}">
-      <div class="rank-card__mark" aria-hidden="true"><span>${mark}</span></div>
+    const metrics = rankMetrics(q);
+    const hierarchy = gameId === 'league' ? (index === 0 ? ' rank-card--primary' : ' rank-card--secondary') : '';
+    return `<article class="rank-card${hierarchy}" style="--rank-accent:${LEAGUE_RANK_COLORS[tier] || LEAGUE_RANK_COLORS.UNRANKED}">
+      ${rankEmblem(tier, gameId, 'rank-card__emblem')}
       <div class="rank-card__body">
         <span class="rank-card__queue">${escapeHtml(queueName(q.queue))}</span>
         <strong>${escapeHtml(unranked ? 'Unranked' : `${tier} ${division}`.trim())}</strong>
         <div class="rank-card__metrics">${metrics || '<em>No ranked record</em>'}</div>
       </div>
-    </div>`;
+    </article>`;
   }).join('')}</div>`;
+}
+function seasonLabel(value, index, gameId) {
+  const season = String(value || '').trim();
+  if (/^s?20\d{2}$/i.test(season)) return season.toUpperCase().replace(/^S?/, 'S');
+  if (/^(?:season|set|act)\s*[a-z0-9 ._-]{1,16}$/i.test(season)) return season;
+  return gameId === 'valorant' ? `Previous act ${index + 1}` : `Previous season ${index + 1}`;
+}
+function rankHistory(history, gameId) {
+  const rows = Array.isArray(history) ? [...history].reverse().slice(0, 8) : [];
+  if (!rows.length) return '<div class="rank-history rank-history--empty"><span>Past ranks</span><small>No historical rank data returned by this source.</small></div>';
+  return `<details class="rank-history">
+    <summary><span>Past ranks</span><small>${rows.length} record${rows.length === 1 ? '' : 's'}</small></summary>
+    <div class="rank-history__rows">${rows.map((row, index) => {
+      const tierName = String(row.tierName || row.tier || 'UNRANKED').toUpperCase();
+      const division = tierName === 'UNRANKED' ? '' : String(row.division || '').toUpperCase();
+      return `<div class="rank-history__row">
+        ${gameId === 'valorant'
+    ? rankIcon(row.tier || 0, 'rank-history__icon')
+    : rankEmblem(tierName, gameId, 'rank-history__icon')}
+        <div><span>${escapeHtml(seasonLabel(row.label || row.seasonId, index, gameId))}${row.queue ? ` · ${escapeHtml(queueName(row.queue))}` : ''}</span><strong>${escapeHtml(tierName === 'UNRANKED' ? 'Unranked' : `${tierName} ${division}`.trim())}</strong></div>
+        <div class="rank-history__metrics">${rankMetrics(row) || (row.games != null ? `${fmt(row.games)} games` : '')}</div>
+      </div>`;
+    }).join('')}</div>
+  </details>`;
+}
+function providerLabel(game) {
+  if (game && game.refreshNeeded) return 'REFRESH NEEDED';
+  if (!game || !game.available) return 'UNAVAILABLE';
+  if (game.source === 'opgg') return 'OP.GG';
+  if (game.source === 'lcu+opgg') return 'LCU + OP.GG';
+  return 'LCU';
+}
+function gameStatHeader(gameId, title, subtitle, source) {
+  return `<header class="game-stat__head"><div class="game-stat__identity">${gameMark(gameId)}<div><span>${title}</span><small>${subtitle}</small></div></div><i class="game-stat__source">${escapeHtml(source)}</i></header>`;
 }
 function renderGameStats(account) {
   const stats = statsFor(account);
   const val = stats.valorant || {};
   const rank = val.rank || {};
   const leagueStats = stats.league || {};
-  const leagueSource = leagueStats.available ? (leagueStats.source === 'opgg' ? 'OP.GG' : 'LCU') : 'UNAVAILABLE';
+  const leagueSource = providerLabel(leagueStats);
   const leagueStatus = leagueStats.platformId ? `${leagueSource} · ${leagueStats.platformId}` : leagueSource;
   const tftStats = stats.tft || {};
-  const tftSource = tftStats.available ? (tftStats.source === 'opgg' ? 'OP.GG' : 'LCU') : 'UNAVAILABLE';
+  const tftSource = providerLabel(tftStats);
+  const tftStatus = tftStats.platformId ? `${tftSource} · ${tftStats.platformId}` : tftSource;
+  const rr = Math.max(0, Math.min(100, Number(rank.rr) || 0));
+  const peak = rank.peakTierName && rank.peakTierName !== 'Unranked' ? rank.peakTierName : 'No peak recorded';
+  const valorantSource = rank.stale ? 'LAST VERIFIED' : val.available ? 'RIOT LIVE' : 'UNAVAILABLE';
+  const valorantRank = rank.tierName
+    ? `<div class="val-rank">
+        ${rankIcon(rank.tier || 0, 'game-stat__rank')}
+        <div class="val-rank__body"><strong>${escapeHtml(rank.tierName)}</strong><span>${rank.rr != null ? `${fmt(rank.rr)} RR` : 'No RR returned'}${rank.stale ? ' · stale' : ''}</span><div class="val-rank__progress"><i style="width:${rr}%"></i></div></div>
+      </div>`
+    : `<div class="game-stat__empty">${escapeHtml(gameErrorMessage(val))}</div>`;
   return `<div class="stats-grid">
-    <section class="game-stat game-stat--valorant"><header><span>VALORANT</span><i class="game-stat__source">${val.available ? 'LIVE' : 'OFFLINE'}</i></header><div class="val-rank">${rankIcon(rank.tier || 0, 'game-stat__rank')}<div><strong>${escapeHtml(rank.tierName || 'Unranked')}</strong><span>${rank.rr != null ? `${fmt(rank.rr)} RR` : 'No rank data'} · Level ${fmt(val.level)}</span></div></div></section>
-    <section class="game-stat game-stat--league"><header><span>LEAGUE</span><i class="game-stat__source">${escapeHtml(leagueStatus)}</i></header>${rankedRows(leagueStats)}</section>
-    <section class="game-stat game-stat--tft"><header><span>TFT</span><i class="game-stat__source">${tftSource}</i></header>${rankedRows(tftStats)}</section>
+    <section class="game-stat game-stat--valorant">
+      ${gameStatHeader('valorant', 'VALORANT', 'Competitive', valorantSource)}
+      ${valorantRank}
+      <div class="game-stat__facts"><span><i>LEVEL</i>${fmt(val.level)}</span><span><i>PEAK</i>${escapeHtml(peak)}</span></div>
+      ${rankHistory(rank.pastSeasons, 'valorant')}
+    </section>
+    <section class="game-stat game-stat--league">
+      ${gameStatHeader('league', 'LEAGUE OF LEGENDS', 'Summoner’s Rift', leagueStatus)}
+      ${rankedRows(leagueStats, 'league')}
+      ${rankHistory(leagueStats.pastSeasons, 'league')}
+    </section>
+    <section class="game-stat game-stat--tft">
+      ${gameStatHeader('tft', 'TEAMFIGHT TACTICS', 'Convergence', tftStatus)}
+      ${rankedRows(tftStats, 'tft')}
+      ${rankHistory(tftStats.pastSeasons, 'tft')}
+    </section>
   </div>`;
 }
 
@@ -542,6 +1111,7 @@ function bindPortraits(root = document) {
 }
 async function refreshAccounts() {
   try { state.accounts = unwrap(await api.accounts.list()); } catch { state.accounts = []; }
+  await refreshConfigProfiles();
 }
 function accountRow(a, signedIn = false) {
   const sub = a.rankName && a.rankName !== 'Unranked'
@@ -562,6 +1132,7 @@ function accountRow(a, signedIn = false) {
     </div>`;
 }
 function renderAccounts() {
+  renderConfigAccounts();
   const list = $('#account-list');
   const q = state.inv.accSearch;
   const currentIds = new Set(state.currentSession?.matchingAccountIds || []);
@@ -575,7 +1146,17 @@ function renderAccounts() {
   list.innerHTML = sorted.length
     ? sorted.map((account) => accountRow(account, currentIds.has(account.id))).join('')
     : `<p class="muted" style="padding:16px;text-align:center;font-size:12px">${state.accounts.length ? 'No matches.' : 'No accounts yet.'}</p>`;
-  $$('[data-select]', list).forEach((el) => el.addEventListener('click', () => selectAccount(el.dataset.select)));
+  let entranceIndex = 0;
+  $$('[data-select]', list).forEach((el) => {
+    const id = el.dataset.select;
+    const isNew = !state.motion.seenAccountIds.has(id);
+    state.motion.seenAccountIds.add(id);
+    if (isNew && entranceIndex < 10 && !reducedMotion.matches) {
+      el.classList.add('enter-item');
+      el.style.setProperty('--enter-index', String(entranceIndex++));
+    }
+    el.addEventListener('click', () => selectAccount(id));
+  });
   $$('[data-row-fav]', list).forEach((button) => button.addEventListener('click', async (event) => {
     event.stopPropagation();
     state.accounts = unwrap(await api.accounts.toggleFavorite(button.dataset.rowFav));
@@ -688,6 +1269,7 @@ function renderDetail() {
     <div class="detail__synced">${a.hasSession ? 'Saved session is intact and bound to this PUUID; Riot will be verified after launch.' : (a.session && a.session.reason === 'legacy' ? 'Legacy session found — save it again to add identity and integrity checks.' : 'Sign into this account once, then “Save session” for faster switching.')} · ${escapeHtml(synced)}</div>`;
 
   bindPortraits(detail);
+  bindRankAssets(detail);
   $$('[data-account-profile]', detail).forEach((button) => button.addEventListener('click', () => openAccountProfile(a, button.dataset.accountProfile)));
   $('[data-switch]', detail).addEventListener('click', () => doSwitch(a.id));
   $$('[data-launch-game]', detail).forEach((button) => button.addEventListener('click', () => doSwitch(a.id, button.dataset.launchGame)));
@@ -722,7 +1304,11 @@ function renderDetail() {
 
 /* ---------------- Account modal ---------------- */
 const modal = $('#account-modal');
+let modalCloseTimer = null;
 function openModal(id = null) {
+  if (modalCloseTimer) clearTimeout(modalCloseTimer);
+  modalCloseTimer = null;
+  modal.classList.remove('is-leaving');
   const acc = id ? state.accounts.find((a) => a.id === id) : null;
   $('#modal-title').textContent = acc ? 'Edit account' : 'Add account';
   $('#acc-id').value = acc ? acc.id : '';
@@ -735,7 +1321,15 @@ function openModal(id = null) {
   modal.hidden = false;
   $('#acc-label').focus();
 }
-function closeModal() { modal.hidden = true; }
+function closeModal() {
+  if (modal.hidden || modal.classList.contains('is-leaving')) return;
+  modal.classList.add('is-leaving');
+  modalCloseTimer = setTimeout(() => {
+    modal.hidden = true;
+    modal.classList.remove('is-leaving');
+    modalCloseTimer = null;
+  }, reducedMotion.matches ? 0 : 190);
+}
 $$('[data-close]', modal).forEach((el) => el.addEventListener('click', closeModal));
 $('#btn-add').addEventListener('click', () => openModal());
 $('#btn-add-2').addEventListener('click', () => openModal());
@@ -781,6 +1375,7 @@ async function syncAccount(id, allowLink = false) {
     if (data.accounts && data.accounts.length) state.accounts = data.accounts;
     if (data.currentSession) state.currentSession = data.currentSession;
     state.stats = data.stats || (data.currentSession && data.currentSession.stats) || state.stats;
+    await refreshConfigProfiles();
     updateStatusBar();
     renderAccounts(); renderDetail();
     logActivity(`Stats synced for ${ownIdentity(data.riotId)}.`, 'good');
@@ -797,7 +1392,7 @@ $('#btn-sync-current').addEventListener('click', async () => {
     updateStatusBar();
     renderAccounts();
     renderDetail();
-    const visibleCurrent = ownIdentity(current.riotId, state.settings.hideDisplayNames ? 'the active account' : current.puuid.slice(0, 8));
+    const visibleCurrent = ownIdentity(current.riotId, 'the active account');
     logActivity(`Current Riot identity resolved as ${visibleCurrent}.`, 'good');
     const ids = current.matchingAccountIds || [];
     if (ids.length === 1) {
@@ -855,16 +1450,29 @@ async function doSwitch(id, launchGame = null) {
       updateStatusBar();
       renderAccounts(); renderDetail();
       const captureNote = res.sessionCapture && res.sessionCapture.captured ? ' Persistent session captured.' : '';
-      const gameNote = res.launchedGame ? ` ${gameLabel(res.launchedGame)} launched.` : '';
-      logActivity(`PUUID verified for ${ownIdentity(res.currentSession.riotId, 'the requested account')}.${gameNote}${captureNote}`, 'good');
-      toast(`${res.mode === 'already-active' ? 'Account was already active' : 'Requested Riot account verified'}.${gameNote}${captureNote}`, 'good');
-      if (state.activeView === 'chat') startChatPolling();
+      const gameNote = res.launchVerified === true && res.launchedGame
+        ? ` ${gameLabel(res.launchedGame)} process confirmed running.`
+        : '';
+      const migration = res.configMigration;
+      const changed = Number(migration && migration.changed || 0);
+      const unchanged = Number(migration && migration.unchanged || 0);
+      const configNote = migration && migration.contentVerifiedAfterProductStart
+        ? (changed > 0
+          ? ` Config contents verified after game start: ${changed} rewritten, ${unchanged} already matched.`
+          : ` Config contents verified after game start: no files rewritten; ${unchanged} already matched.`)
+        : '';
+      logActivity(`PUUID verified for ${ownIdentity(res.currentSession.riotId, 'the requested account')}.${gameNote}${configNote}${captureNote}`, 'good');
+      toast(`${res.mode === 'already-active' ? 'Account was already active' : 'Requested Riot account verified'}.${gameNote}${configNote}${captureNote}`, 'good');
+      startChatPolling();
     } else if (res.manualRequired) {
       logActivity(`Native login needs attention: ${res.reason || 'input unavailable'}.`, 'bad');
       toast(`Automatic login could not complete: ${res.reason || 'unknown input error'}`, 'bad');
     } else if (res.verification && res.verification.status === 'mismatched') {
       logActivity('Riot exposed a different PUUID; switch rejected.', 'bad');
       toast('Riot signed into a different account. The switch was rejected and no account data was attached.', 'bad');
+    } else if (res.credentialAttention || res.authenticationNotConfirmed) {
+      logActivity('Riot did not confirm authentication; saved credentials or a verification challenge need attention.', 'warn');
+      toast('Riot did not authenticate this account. Verify the saved login username/password, or complete any Riot verification challenge.', 'bad');
     } else if (res.awaitingUserVerification) {
       logActivity('Riot verification is still pending; the client was left open for 2FA.', 'warn');
       toast('Complete 2FA or the verification challenge in Riot Client. Riot Relay left the session open and did not restart it.', 'warn');
@@ -883,7 +1491,10 @@ async function doSwitch(id, launchGame = null) {
   } catch (e) {
     logActivity(e.message, 'bad');
     toast(e.message, 'bad');
-  } finally { switchOverlay.hidden = true; }
+  } finally {
+    await refreshConfigProfiles();
+    switchOverlay.hidden = true;
+  }
 }
 
 /* ---------------- Status bar ---------------- */
@@ -913,7 +1524,7 @@ async function checkClientStatus() {
       updateStatusBar();
       if (changed) renderAccounts();
       renderDetail();
-      if (state.activeView === 'chat' && !state.chat.timer) startChatPolling();
+      if (!state.chat.timer) startChatPolling();
     } catch {
       // A running client on its sign-in screen is not an authenticated session.
       state.currentSession = null;
@@ -982,6 +1593,7 @@ async function loadInventory() {
     const inv = unwrap(await api.inventory.buildCurrent(game));
     if (requestId !== inventoryRequestId || state.inv.game !== game) return;
     state.inventory = inv;
+    state.inv.entranceSeen = new Set();
     logActivity(`${gameLabel(game)} inventory loaded (${fmt(inv.summary.total)} items).`, 'good');
     const present = orderedTypes(inv.summary.byType);
     state.inv.section = present.includes('Skin') ? 'Skin' : (present[0] || '');
@@ -1107,19 +1719,20 @@ function safeImageUrl(value) {
     return allowed ? url.href : '';
   } catch { return ''; }
 }
-function itemCard(it) {
+function itemCard(it, entranceIndex = -1) {
   const name = String(it.name || 'Unnamed item');
   const category = String(it.category || it.type || 'Collection');
   const type = String(it.type || 'item').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
-  const cls = `item item--${type}${it.fit === 'cover' ? ' item--cover' : ''}`;
+  const cls = `item item--${type}${it.fit === 'cover' ? ' item--cover' : ''}${entranceIndex >= 0 ? ' enter-item' : ''}`;
   const image = safeImageUrl(it.image);
   const fallback = `<div class="item__fallback"><span>${ic('image', 20)}</span><b>${escapeHtml(initials(name))}</b></div>`;
   const badges = [];
   if (it.tier && it.tier !== 'Standard') badges.push(`<span class="badge badge--tier" style="background:${escapeHtml(it.tierColor || '#5a6b7a')}">${escapeHtml(String(it.tier).replace(' Edition', ''))}</span>`);
   if (it.value) badges.push(`<span class="badge badge--vp">${fmt(it.value)} ${escapeHtml(it.currency || (state.inv.game === 'lol' ? 'RP' : 'VP'))}</span>`);
   if (it.variants) badges.push(`<span class="badge">+${fmt(it.variants)}</span>`);
+  const motionStyle = entranceIndex >= 0 ? `;--enter-index:${entranceIndex}` : '';
   return `
-    <article class="${cls}" style="--tier:${escapeHtml(it.tierColor || '#4a4a55')}">
+    <article class="${cls}" style="--tier:${escapeHtml(it.tierColor || '#4a4a55')}${motionStyle}">
       <div class="item__img ${image ? 'is-loading' : 'has-error'}">
         ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(name)}" loading="lazy" decoding="async" />` : ''}
         ${fallback}
@@ -1154,7 +1767,15 @@ function renderInventory() {
   $('#inv-section-name').textContent = sectionLabel(section || 'Collection');
   $('#inv-section-count').textContent = fmt(items.length);
   const grid = $('#inv-grid');
-  grid.innerHTML = items.length ? items.map(itemCard).join('') : '<div class="empty inventory-no-results"><p class="muted">No items in this section match your filters.</p></div>';
+  let entranceIndex = 0;
+  const cards = items.map((item) => {
+    const key = `${item.type || ''}:${item.id || item.uuid || item.name || ''}:${item.category || ''}`;
+    const isNew = !state.inv.entranceSeen.has(key);
+    state.inv.entranceSeen.add(key);
+    const animateAt = isNew && entranceIndex < 10 && !reducedMotion.matches ? entranceIndex++ : -1;
+    return itemCard(item, animateAt);
+  });
+  grid.innerHTML = items.length ? cards.join('') : '<div class="empty inventory-no-results"><p class="muted">No items in this section match your filters.</p></div>';
   bindInventoryImages(grid);
 }
 
@@ -1303,21 +1924,46 @@ function buildValueCanvas() {
 }
 
 /* ---------------- Settings ---------------- */
-$$('.settingnav').forEach((b) => b.addEventListener('click', () => {
-  $$('.settingnav').forEach((x) => x.classList.toggle('is-active', x === b));
-  $$('.setting-group').forEach((g) => g.classList.toggle('is-active', g.dataset.group === b.dataset.group));
-}));
+function showSettingGroup(group) {
+  $$('.settingnav').forEach((item) => item.classList.toggle('is-active', item.dataset.group === group));
+  $$('.setting-group').forEach((item) => item.classList.toggle('is-active', item.dataset.group === group));
+}
+$$('.settingnav').forEach((button) => button.addEventListener('click', () => showSettingGroup(button.dataset.group)));
+function renderStartupState(startup) {
+  const actual = startup && typeof startup === 'object'
+    ? startup
+    : { supported: false, enabled: false, reason: 'Windows startup state is unavailable.' };
+  state.startup = actual;
+  const input = $('#set-startup');
+  input.checked = actual.supported && actual.enabled === true;
+  input.disabled = !actual.supported;
+  const control = input.closest('.startup-control');
+  control.classList.toggle('is-disabled', !actual.supported);
+  $('#startup-status').textContent = actual.supported
+    ? (actual.enabled
+      ? 'Enabled. Riot Relay will start after you sign in to Windows.'
+      : 'Disabled. Riot Relay will not start automatically.')
+    : (actual.reason || 'Available in installed Windows builds.');
+}
 async function loadSettings() {
-  const [s, vaultStatus, helloAvailable] = await Promise.all([
+  const startupRequest = api.startup.get().then(unwrap).catch((error) => ({
+    supported: false,
+    enabled: false,
+    reason: error && error.message ? error.message : 'Windows startup state is unavailable.',
+  }));
+  const [s, vaultStatus, helloAvailable, startup] = await Promise.all([
     api.settings.get().then(unwrap),
     api.vault.status().then(unwrap),
     windowsHelloAvailable(),
+    startupRequest,
   ]);
   state.settings = s;
+  state.startup = startup;
   $('#set-client-path').value = s.clientPath || '';
   $('#set-autofill').checked = !!s.autoFill;
   $('#set-minimize').checked = !!s.minimizeOnSwitch;
   $('#set-minimize-tray').checked = s.minimizeToTray !== false;
+  renderStartupState(startup);
   const keyStorageMode = vaultStatus.keyStorageMode || 'disabled';
   $$('input[name="key-storage-mode"]').forEach((input) => {
     input.checked = input.value === keyStorageMode;
@@ -1330,6 +1976,23 @@ async function loadSettings() {
   $('#deceive-activity-mode').value = s.deceiveActivityMode || 'hide';
   $('#deceive-custom-status').value = s.deceiveCustomStatus || '';
   $('#set-deceive-helper').checked = s.deceiveLeagueHelper !== false;
+  $('#set-discord-enabled').checked = !!s.discordPresenceEnabled;
+  $('#set-discord-client-id').value = s.discordClientId || '';
+  $('#set-discord-game').checked = s.discordShowGame !== false;
+  $('#set-discord-rank').checked = !!s.discordShowRank;
+  $('#set-discord-riot-id').checked = !!s.discordShowRiotId;
+  $('#set-discord-status').checked = !!s.discordShowStatus;
+  $('#set-discord-elapsed').checked = s.discordShowElapsed !== false;
+  $('#set-discord-live').checked = !!s.discordShowLiveMatch;
+  $('#set-discord-match-mode').checked = !!s.discordShowMatchMode;
+  $('#set-discord-match-map').checked = !!s.discordShowMatchMap;
+  $('#set-discord-match-phase').checked = !!s.discordShowMatchPhase;
+  $('#set-discord-match-score').checked = !!s.discordShowMatchScore;
+  $('#set-discord-match-elapsed').checked = !!s.discordShowMatchElapsed;
+  updateDiscordLiveOptions();
+  $('#set-discord-details').value = s.discordCustomDetails || '';
+  $('#set-discord-state').value = s.discordCustomState || '';
+  $('#set-discord-image').value = s.discordLargeImage || '';
   $('#set-hide-login').checked = !!s.hideLoginNames;
   $('#set-hide-display').checked = !!s.hideDisplayNames;
   $('#client-detected').textContent = s.detectedClient ? `Detected: ${s.detectedClient}` : 'Riot Client not auto-detected. Set the path manually.';
@@ -1341,6 +2004,10 @@ async function loadSettings() {
     : 'Windows Hello is not configured or unavailable; standard OS-stored mode can still be used.';
   updateDeceiveUI();
   refreshDeceiveState();
+  refreshDiscordState();
+  if (s.discordPresenceEnabled) api.discord.refresh('').then(unwrap).then(refreshDiscordState).catch(() => refreshDiscordState());
+  refreshConfigProfiles();
+  renderConfigAccounts();
   refreshCatalogStatus();
 }
 function updateDeceiveUI(runtime = null) {
@@ -1386,6 +2053,276 @@ async function refreshDeceiveState() {
     return null;
   }
 }
+async function refreshDiscordState(runtime = null) {
+  try { state.discord = runtime || unwrap(await api.discord.getState()); }
+  catch { state.discord = { enabled: false, connected: false, configured: false, published: false, status: 'unavailable', lastError: 'Discord activity is unavailable.' }; }
+  const enabled = !!state.settings.discordPresenceEnabled;
+  const status = String(state.discord.status || (state.discord.published ? 'published' : state.discord.connected ? 'publishing' : 'idle'));
+  const labels = {
+    disabled: 'Disabled', unconfigured: 'Application ID required', unavailable: 'Unavailable', connecting: 'Finding Discord',
+    'not-running': 'Discord not running', handshake: 'Discord handshake', publishing: 'Publishing activity',
+    published: 'Published', rejected: 'Rejected', idle: enabled ? 'Waiting for Discord' : 'Disabled',
+  };
+  const runtimeEl = $('#discord-runtime');
+  runtimeEl.className = `deceive-runtime ${status === 'published' ? 'is-connected' : enabled ? 'is-running' : ''}`;
+  runtimeEl.innerHTML = `<i class="dot ${status === 'published' ? 'dot--on' : enabled ? 'dot--wait' : 'dot--off'}"></i><span>${escapeHtml(labels[status] || 'Discord activity')}</span>`;
+  const preview = state.discord.preview || {};
+  $('#discord-preview').textContent = `${preview.details || 'Riot Relay'}${preview.state ? ` — ${preview.state}` : ''}`;
+  const diagnostics = [];
+  if (state.discord.lastError) diagnostics.push(state.discord.lastError);
+  else if (status === 'published') diagnostics.push('Discord acknowledged SET_ACTIVITY. The activity is published.');
+  else if (status === 'handshake') diagnostics.push('Local pipe connected; waiting for Discord READY.');
+  else if (status === 'publishing') diagnostics.push('READY received; waiting for Discord to acknowledge SET_ACTIVITY.');
+  else if (status === 'connecting') diagnostics.push('Checking Discord desktop activity pipes.');
+  else if (status === 'unconfigured') diagnostics.push('Enter the public Application ID from your Discord developer application.');
+  else if (status === 'not-running') diagnostics.push('Start Discord desktop, then retry. Browser Discord does not expose the local activity pipe.');
+  else diagnostics.push(state.discord.closeReason || 'Discord activity is idle.');
+  if (Number.isInteger(state.discord.pipe)) diagnostics.push(`Pipe ${state.discord.pipe}`);
+  if (state.discord.lastPublishAt) diagnostics.push(`Last acknowledgement ${new Date(state.discord.lastPublishAt).toLocaleTimeString()}`);
+  if (state.discord.reconnectCount > 0) diagnostics.push(`${state.discord.reconnectCount} reconnect attempt${state.discord.reconnectCount === 1 ? '' : 's'}`);
+  $('#discord-diagnostics').textContent = diagnostics.filter(Boolean).join(' · ');
+}
+
+function updateDiscordLiveOptions() {
+  const enabled = $('#set-discord-live').checked;
+  $$('#discord-live-fields input').forEach((input) => (input.disabled = !enabled));
+  $('#discord-live-fields').classList.toggle('is-disabled', !enabled);
+}
+
+function discordSettingsPatch() {
+  return {
+    discordPresenceEnabled: $('#set-discord-enabled').checked,
+    discordClientId: $('#set-discord-client-id').value.trim(),
+    discordShowGame: $('#set-discord-game').checked,
+    discordShowRank: $('#set-discord-rank').checked,
+    discordShowRiotId: $('#set-discord-riot-id').checked,
+    discordShowStatus: $('#set-discord-status').checked,
+    discordShowElapsed: $('#set-discord-elapsed').checked,
+    discordShowLiveMatch: $('#set-discord-live').checked,
+    discordShowMatchMode: $('#set-discord-match-mode').checked,
+    discordShowMatchMap: $('#set-discord-match-map').checked,
+    discordShowMatchPhase: $('#set-discord-match-phase').checked,
+    discordShowMatchScore: $('#set-discord-match-score').checked,
+    discordShowMatchElapsed: $('#set-discord-match-elapsed').checked,
+    discordCustomDetails: $('#set-discord-details').value.trim(),
+    discordCustomState: $('#set-discord-state').value.trim(),
+    discordLargeImage: $('#set-discord-image').value.trim(),
+  };
+}
+
+async function saveDiscordSettings(refresh = true) {
+  await setSetting(discordSettingsPatch());
+  if (refresh && state.settings.discordPresenceEnabled) {
+    try { await refreshDiscordState(unwrap(await api.discord.refresh(''))); }
+    catch (error) { await refreshDiscordState(); toast(error.message, 'warn'); }
+  } else await refreshDiscordState();
+}
+
+function configNamespace() { return $('#config-game').value === 'lol' || $('#config-game').value === 'tft' ? 'league' : $('#config-game').value; }
+function linkedConfigAccounts() {
+  const linkedIds = new Set(state.configProfiles.filter((item) => item && item.linked === true).map((item) => item.accountId));
+  return state.accounts.filter((account) => linkedIds.has(account.id));
+}
+function activeConfigAccountId() {
+  if (state.configProfilesError) return null;
+  const rosterIds = new Set(state.accounts.map((account) => account.id));
+  const linkedIds = new Set(state.configProfiles
+    .filter((item) => item && item.linked === true && rosterIds.has(item.accountId))
+    .map((item) => item.accountId));
+  const matches = [...new Set(state.currentSession?.matchingAccountIds || [])]
+    .filter((accountId) => rosterIds.has(accountId) && linkedIds.has(accountId));
+  return matches.length === 1 ? matches[0] : null;
+}
+function orderedConfigAccounts() {
+  const linkedIds = new Set(linkedConfigAccounts().map((account) => account.id));
+  return [...state.accounts].sort((a, b) => Number(linkedIds.has(b.id)) - Number(linkedIds.has(a.id)));
+}
+function differentLinkedConfigAccountId(accountId) {
+  return linkedConfigAccounts().find((account) => account.id !== accountId)?.id || '';
+}
+function normalizeConfigRoles(sourceValue, targetValue) {
+  const accountIds = new Set(state.accounts.map((account) => account.id));
+  const validPair = accountIds.has(sourceValue) && accountIds.has(targetValue) && sourceValue !== targetValue;
+  if (validPair && state.configRoles.intentional) return { sourceId: sourceValue, targetId: targetValue };
+  if (!validPair) state.configRoles.intentional = false;
+  const sourceId = activeConfigAccountId() || linkedConfigAccounts()[0]?.id || '';
+  return { sourceId, targetId: differentLinkedConfigAccountId(sourceId) };
+}
+function updateConfigSignedInControls() {
+  const activeId = activeConfigAccountId();
+  for (const button of $$('.config-use-current')) {
+    button.disabled = !activeId;
+    button.title = activeId ? `Use signed-in account: ${configAccountLabel(activeId)}` : 'No unique signed-in linked account is available.';
+  }
+}
+function renderConfigAccounts() {
+  if (!$('#config-source') || !$('#config-target')) return;
+  const selection = normalizeConfigRoles($('#config-source').value, $('#config-target').value);
+  const activeId = activeConfigAccountId();
+  const statusById = new Map(state.configProfiles.map((item) => [item.accountId, item]));
+  const options = orderedConfigAccounts().map((account) => {
+    const linked = statusById.get(account.id)?.linked === true;
+    const suffix = account.id === activeId ? ' · signed in' : linked ? '' : ' · sync required';
+    return `<option value="${escapeHtml(account.id)}">${escapeHtml(account.label || 'Unnamed account')}${suffix}</option>`;
+  }).join('');
+  const placeholder = `<option value="">${state.accounts.length ? 'Select an account' : 'No accounts'}</option>`;
+  $('#config-source').innerHTML = placeholder + options;
+  $('#config-target').innerHTML = placeholder + options;
+  $('#config-source').value = selection.sourceId;
+  $('#config-target').value = selection.targetId;
+  updateConfigSignedInControls();
+  renderConfigProfileStatus();
+}
+function enforceDistinctConfigRoles(changedRole) {
+  const changed = $(`#config-${changedRole}`);
+  const oppositeRole = changedRole === 'source' ? 'target' : 'source';
+  const opposite = $(`#config-${oppositeRole}`);
+  const linkedIds = new Set(linkedConfigAccounts().map((account) => account.id));
+  if (opposite.value !== changed.value && linkedIds.has(opposite.value)) return;
+  opposite.value = differentLinkedConfigAccountId(changed.value);
+}
+function useActiveConfigAccount(role) {
+  const activeId = activeConfigAccountId();
+  if (!activeId) return;
+  $(`#config-${role}`).value = activeId;
+  enforceDistinctConfigRoles(role);
+  state.configRoles.intentional = true;
+  renderConfigProfileStatus();
+}
+
+function formatConfigCaptureTime(value) {
+  const date = new Date(value || 0);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+function configAccountLabel(accountId) {
+  const account = state.accounts.find((item) => item.id === accountId);
+  return account ? account.label || 'Unnamed account' : 'Select an account';
+}
+function latestCloudSourceStatus() {
+  return state.configProfiles
+    .filter((item) => item && item.cloudCaptured === true)
+    .slice()
+    .sort((a, b) => String(b.cloudCapturedAt || '').localeCompare(String(a.cloudCapturedAt || '')))[0] || null;
+}
+function setConfigStepState(element, stateName) {
+  element.classList.toggle('is-complete', stateName === 'complete');
+  element.classList.toggle('is-blocked', stateName === 'blocked');
+  element.classList.toggle('is-active', stateName === 'active');
+  element.classList.toggle('is-error', stateName === 'error');
+  element.classList.toggle('is-unknown', stateName === 'unknown');
+}
+function renderConfigProfileStatus() {
+  const namespace = configNamespace();
+  const sourceId = $('#config-source').value;
+  const targetId = $('#config-target').value;
+  const source = state.configProfiles.find((item) => item.accountId === sourceId);
+  const target = state.configProfiles.find((item) => item.accountId === targetId);
+  const linkedCount = linkedConfigAccounts().length;
+  const enoughLinkedAccounts = linkedCount >= 2;
+  const activeId = activeConfigAccountId();
+  const activeCaptureRequired = namespace !== 'valorant';
+  const differentAccounts = !!sourceId && !!targetId && sourceId !== targetId;
+  const sourceLinked = source?.linked === true;
+  const targetLinked = target?.linked === true;
+  const sourceReady = !!(source && source.profiles && source.profiles[namespace]);
+  const targetReady = !!(target && target.profiles && target.profiles[namespace]);
+  const sourceInvalid = !!(source && source.profileErrors && source.profileErrors[namespace]);
+  const targetInvalid = !!(target && target.profileErrors && target.profileErrors[namespace]);
+  const sourceCaptureAllowed = enoughLinkedAccounts && sourceLinked && (!activeCaptureRequired || activeId === sourceId);
+  const targetCaptureAllowed = enoughLinkedAccounts && targetLinked && (!activeCaptureRequired || activeId === targetId);
+  const bound = !!(target && target.bindings && target.bindings[namespace]);
+  const applicable = !!(target && target.bindingApplicable && target.bindingApplicable[namespace]);
+  const boundSourceId = target && target.bindingSources && target.bindingSources[namespace];
+  const selectedRouteBound = bound && boundSourceId === sourceId;
+  const sourceTime = sourceReady ? formatConfigCaptureTime(source.profileCapturedAt && source.profileCapturedAt[namespace]) : '';
+  const targetTime = targetReady ? formatConfigCaptureTime(target.profileCapturedAt && target.profileCapturedAt[namespace]) : '';
+  const lastApplied = target && target.lastAppliedAt && target.lastAppliedAt[namespace];
+  const lastResult = target && target.lastResult && target.lastResult[namespace];
+  const gameName = $('#config-game').selectedOptions[0]?.textContent || 'Game';
+  const unavailable = !!state.configProfilesError;
+
+  const sourceCapturePrompt = namespace === 'valorant' ? 'Capture PUUID-owned Riot folder' : activeId === sourceId ? 'Signed-in account ready to capture' : 'Sign into this account to capture';
+  const targetCapturePrompt = namespace === 'valorant' ? 'Capture PUUID-owned baseline' : activeId === targetId ? 'Signed-in account ready to capture' : 'Sign into this account to capture';
+  $('#config-source-status').textContent = unavailable ? 'Status unavailable — controls paused'
+    : !enoughLinkedAccounts ? 'Link at least two roster accounts'
+      : !sourceLinked ? 'Sync this account first'
+        : sourceInvalid ? 'Captured profile failed integrity validation'
+          : sourceReady ? `Captured for verified PUUID${sourceTime ? ` · ${sourceTime}` : ''}` : sourceCapturePrompt;
+  $('#config-target-status').textContent = unavailable ? 'Status unavailable — controls paused'
+    : !enoughLinkedAccounts ? 'Link at least two roster accounts'
+      : !sourceReady ? 'Waiting for step 1'
+        : !differentAccounts ? 'Choose a different target'
+          : !targetLinked ? 'Sync this account first'
+            : targetInvalid ? 'Captured profile failed integrity validation'
+              : targetReady ? `Captured for verified PUUID${targetTime ? ` · ${targetTime}` : ''}` : targetCapturePrompt;
+  $('#config-review-status').textContent = unavailable ? 'Application state unavailable'
+    : !enoughLinkedAccounts ? 'Two distinct linked accounts required'
+      : selectedRouteBound && !applicable ? 'Bound — profile is no longer applicable'
+        : selectedRouteBound && (!lastResult || lastResult.status === 'failed')
+          ? lastResult && lastResult.status === 'failed' ? 'Bound — last application failed' : 'Bound — not yet applied'
+          : selectedRouteBound ? 'Bound — local application verified'
+            : bound ? 'Target is bound to another source'
+              : sourceReady && targetReady && differentAccounts ? 'Ready to bind' : 'Complete steps 1 and 2';
+  $('#config-profile-status').textContent = `${configAccountLabel(sourceId)} → ${configAccountLabel(targetId)} · ${gameName}`;
+  $('#config-application-status').textContent = lastResult
+    ? `${lastResult.status === 'failed' ? 'Last attempt failed' : 'Last local verification'}${lastApplied ? ` · ${formatConfigCaptureTime(lastApplied)}` : ''} · ${lastResult.changed} changed, ${lastResult.unchanged} unchanged, ${lastResult.skipped} skipped. Riot cloud acceptance is not claimed.`
+    : 'No local application attempt recorded. Manual game launches are not intercepted.';
+
+  setConfigStepState($('#config-step-source'), unavailable ? 'unknown' : !enoughLinkedAccounts ? 'blocked' : sourceInvalid ? 'error' : sourceReady ? 'complete' : 'active');
+  setConfigStepState($('#config-step-target'), unavailable ? 'unknown' : !enoughLinkedAccounts ? 'blocked' : targetInvalid ? 'error'
+    : targetReady && differentAccounts ? 'complete' : sourceReady ? 'active' : 'blocked');
+  setConfigStepState($('#config-step-review'), unavailable ? 'unknown' : !enoughLinkedAccounts ? 'blocked' : selectedRouteBound && !applicable ? 'error'
+    : selectedRouteBound ? 'complete' : sourceReady && targetReady && differentAccounts ? 'active' : 'blocked');
+
+  $('#btn-config-capture-source').disabled = unavailable || !sourceCaptureAllowed;
+  $('#btn-config-capture-target').disabled = unavailable || !sourceReady || !differentAccounts || !targetCaptureAllowed;
+  $('#btn-config-migrate').disabled = unavailable || !enoughLinkedAccounts || !sourceLinked || !targetLinked || !sourceReady || !targetReady || !differentAccounts;
+  $('#btn-config-migrate').textContent = selectedRouteBound ? 'Update binding' : 'Save binding';
+  $('#btn-config-apply').disabled = unavailable || !enoughLinkedAccounts || !differentAccounts || !sourceLinked || !targetLinked || !selectedRouteBound || !applicable;
+  $('#btn-config-remove').hidden = !bound;
+  $('#btn-config-remove').disabled = unavailable;
+  const cloud = $('#config-cloud');
+  if (cloud) {
+    const activeId = activeConfigAccountId();
+    // The captured source is whichever validated account blob is newest.
+    const source = latestCloudSourceStatus();
+    const sourceId = source ? source.accountId : null;
+    const sourceIsActive = !!activeId && sourceId === activeId;
+    const activeStatus = activeId && state.configProfiles.find((item) => item.accountId === activeId);
+    const activeBackup = !!(activeStatus && activeStatus.cloudBackupAvailable);
+    // Capture whoever is signed in right now (the only account you can read).
+    if ($('#btn-cloud-capture')) $('#btn-cloud-capture').disabled = unavailable || !activeId;
+    // Apply the captured source to a DIFFERENT signed-in target.
+    if ($('#btn-cloud-apply')) $('#btn-cloud-apply').disabled = unavailable || !sourceId || !activeId || sourceIsActive;
+    // Restore only when the signed-in account actually has a backup.
+    if ($('#btn-cloud-restore')) $('#btn-cloud-restore').disabled = unavailable || !activeId || !activeBackup;
+    const statusEl = $('#config-cloud-status');
+    if (statusEl) {
+      statusEl.textContent = source
+        ? `Source captured: ${configAccountLabel(sourceId)}. Sign into a target account, then Apply.`
+        : 'No source captured yet. Sign into the source account and Capture.';
+    }
+  }
+  updateConfigSignedInControls();
+}
+
+async function refreshConfigProfiles() {
+  try {
+    state.configProfiles = unwrap(await api.configs.status());
+    state.configProfilesError = null;
+  } catch (error) {
+    state.configProfilesError = error && error.message ? error.message : 'Configuration status is unavailable.';
+  }
+  renderConfigAccounts();
+}
+
+async function runConfigAction(button, action, success) {
+  button.disabled = true; button.classList.add('is-loading');
+  try { await action(); await refreshConfigProfiles(); toast(success, 'good'); }
+  catch (error) { logActivity(error.message, 'bad'); toast(error.message, 'bad'); }
+  finally { button.classList.remove('is-loading'); renderConfigProfileStatus(); }
+}
+
 async function refreshCatalogStatus() {
   try {
     const st = unwrap(await api.inventory.catalogStatus());
@@ -1403,11 +2340,100 @@ $('#set-minimize-tray').addEventListener('change', async (event) => {
     ? 'Minimize to tray enabled. Use the Windows notification area to restore or quit Riot Relay.'
     : 'Minimize to tray disabled. The minimize button will keep Riot Relay on the taskbar.', 'good');
 });
+$('#set-startup').addEventListener('change', async (event) => {
+  const input = event.target;
+  const requested = input.checked;
+  input.disabled = true;
+  input.closest('.startup-control').classList.add('is-disabled');
+  $('#startup-status').textContent = requested ? 'Enabling Windows startup…' : 'Disabling Windows startup…';
+  try {
+    const actual = unwrap(await api.startup.set(requested));
+    renderStartupState(actual);
+    toast(actual.enabled ? 'Auto-launch with Windows enabled.' : 'Auto-launch with Windows disabled.', 'good');
+  } catch (error) {
+    try { renderStartupState(unwrap(await api.startup.get())); }
+    catch { renderStartupState(state.startup); }
+    toast(error.message, 'bad');
+  }
+});
+
+api.discord.onState((runtime) => refreshDiscordState(runtime));
+$('#set-discord-live').addEventListener('change', () => {
+  updateDiscordLiveOptions();
+  saveDiscordSettings(true);
+});
+$('#btn-discord-save').addEventListener('click', async () => {
+  await saveDiscordSettings(true);
+  toast(state.settings.discordPresenceEnabled ? 'Discord activity settings saved.' : 'Discord activity disabled and cleared.', 'good');
+});
+$('#set-discord-enabled').addEventListener('change', () => saveDiscordSettings(true));
+$('#btn-discord-refresh').addEventListener('click', async (event) => {
+  const button = event.currentTarget; button.disabled = true; button.classList.add('is-loading');
+  try { await refreshDiscordState(unwrap(await api.discord.refresh(''))); toast('Discord activity refreshed from the verified Riot session.', 'good'); }
+  catch (error) { toast(error.message, 'warn'); await refreshDiscordState(); }
+  finally { button.disabled = false; button.classList.remove('is-loading'); }
+});
+$('#btn-discord-test').addEventListener('click', async (event) => {
+  const button = event.currentTarget; button.disabled = true; button.classList.add('is-loading');
+  try {
+    await setSetting(discordSettingsPatch());
+    const runtime = unwrap(await api.discord.test());
+    await refreshDiscordState(runtime);
+    toast('Minimal Discord activity submitted. Wait for Published to confirm Discord acknowledged it.', 'good');
+  } catch (error) { toast(error.message, 'warn'); await refreshDiscordState(); }
+  finally { button.disabled = false; button.classList.remove('is-loading'); }
+});
+$('#config-source').addEventListener('change', () => { enforceDistinctConfigRoles('source'); state.configRoles.intentional = true; renderConfigProfileStatus(); });
+$('#config-target').addEventListener('change', () => { enforceDistinctConfigRoles('target'); state.configRoles.intentional = true; renderConfigProfileStatus(); });
+$('#config-game').addEventListener('change', renderConfigProfileStatus);
+$('#btn-config-source-current').addEventListener('click', () => useActiveConfigAccount('source'));
+$('#btn-config-target-current').addEventListener('click', () => useActiveConfigAccount('target'));
+$('#btn-config-capture-source').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  () => api.configs.capture($('#config-source').value, $('#config-game').value).then(unwrap),
+  $('#config-game').value === 'valorant' ? 'Source preferences captured from its PUUID-owned Riot folder.' : 'Source preferences captured while the selected PUUID was verified.'));
+$('#btn-config-capture-target').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  () => api.configs.capture($('#config-target').value, $('#config-game').value).then(unwrap),
+  $('#config-game').value === 'valorant' ? 'Target baseline captured from its PUUID-owned Riot folder.' : 'Target baseline captured while the selected PUUID was verified.'));
+$('#btn-config-migrate').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  () => api.configs.migrate($('#config-source').value, $('#config-target').value, $('#config-game').value).then(unwrap),
+  'Binding saved. No files were changed; use Apply and launch target.'));
+$('#btn-config-apply').addEventListener('click', () => doSwitch($('#config-target').value, $('#config-game').value));
+$('#btn-cloud-capture').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  async () => {
+    // You can only capture whoever is signed in right now; that becomes the source.
+    const activeId = activeConfigAccountId();
+    if (!activeId) throw new Error('Sign in to the account you want to use as the source in the Riot Client first.');
+    unwrap(await api.configs.captureCloud(activeId));
+    logActivity('Captured VALORANT settings from the signed-in account (set as source). Switch to a target account, then Apply.', 'good');
+  },
+  'Source settings captured.'));
+$('#btn-cloud-apply').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  async () => {
+    const sourceId = latestCloudSourceStatus()?.accountId;
+    if (!sourceId) throw new Error('Capture a source account’s settings first.');
+    const result = unwrap(await api.configs.applyCloud(sourceId));
+    logActivity(`Applied source settings to the signed-in account${result.hadBackup ? ' (previous settings backed up)' : ''}. Restart VALORANT to load them.`, 'good');
+  },
+  'Settings applied to the signed-in account.'));
+$('#btn-cloud-restore').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  async () => {
+    const targetId = activeConfigAccountId();
+    if (!targetId) throw new Error('Sign in to the account you want to restore first.');
+    unwrap(await api.configs.restoreCloud(targetId));
+    logActivity('Restored the signed-in account’s pre-migration settings from backup. Restart VALORANT to load them.', 'good');
+  },
+  'Settings backup restored.'));
+$('#btn-config-remove').addEventListener('click', (event) => runConfigAction(event.currentTarget,
+  () => api.configs.removeBinding($('#config-target').value, $('#config-game').value).then(unwrap),
+  'Binding removed; captured profiles and backups were kept.'));
 async function applyPrivacySetting(key, checked) {
   await setSetting({ [key]: checked });
   renderAccounts(); renderDetail(); updateStatusBar();
   if (state.inventory) renderValueCard();
   if (state.chat.identity && state.chat.identity.riotId) $('#chat-identity').textContent = `Active · ${displayRiotId(state.chat.identity.riotId)}`;
+  renderChatFriends();
+  renderChatHeader(state.chat.friends.find((friend) => friend.id === state.chat.selectedId));
+  if (state.chat.selectedId) renderChatMessages();
 }
 $('#set-hide-login').addEventListener('change', (event) => applyPrivacySetting('hideLoginNames', event.target.checked));
 $('#set-hide-display').addEventListener('change', (event) => applyPrivacySetting('hideDisplayNames', event.target.checked));
@@ -1509,7 +2535,7 @@ function renderUpdateState(updateState) {
   const previousStatus = lastUpdateStatus;
   state.updates = { ...state.updates, ...updateState };
   lastUpdateStatus = state.updates.status;
-  const version = String(state.updates.currentVersion || '1.3.2');
+  const version = String(state.updates.currentVersion || '1.3.3');
   const available = String(state.updates.availableVersion || '');
   const progress = Math.max(0, Math.min(100, Number(state.updates.progress) || 0));
   $('#app-version-title').textContent = version;

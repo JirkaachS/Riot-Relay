@@ -45,9 +45,21 @@ jobs:
             "dist/latest.yml",
             "dist/Riot-Relay-${version}-x64.msi"
           )
+          $checksumFile = "dist/SHA256SUMS.txt"
+          $assets | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_).Hash.ToLowerInvariant()
+            "${hash}  $([System.IO.Path]::GetFileName($_))"
+          } | Set-Content -Path $checksumFile -Encoding utf8
+          $assets += $checksumFile
+          $notesFile = ".github/release-notes/${tag}.md"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --clobber
+            if (Test-Path $notesFile) {
+              gh release edit $tag --title "Riot Relay ${version}" --notes-file $notesFile
+            }
+          } elseif (Test-Path $notesFile) {
+            gh release create $tag @assets --title "Riot Relay ${version}" --notes-file $notesFile --verify-tag
           } else {
             gh release create $tag @assets --title "Riot Relay ${version}" --generate-notes --verify-tag
           }

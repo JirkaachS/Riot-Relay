@@ -3,19 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' https://media.valorant-api.com https://*.valorant-api.com https://raw.communitydragon.org data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self' https://valorant-api.com" />
+        content="default-src 'self'; img-src 'self' https://media.valorant-api.com https://*.valorant-api.com https://raw.communitydragon.org https://cdn.jsdelivr.net data:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src 'self' https://valorant-api.com" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Riot Relay</title>
   <link rel="icon" type="image/png" href="../build/icon.png" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div class="boot-screen" id="boot-screen" role="status" aria-live="polite" aria-label="Starting Riot Relay">
+    <img class="boot-screen__mark" src="../build/icon.png" alt="" />
+    <div class="boot-screen__copy"><strong>Riot Relay</strong><span id="boot-status">Starting secure workspace…</span></div>
+    <div class="boot-screen__indicator" aria-hidden="true"><i></i></div>
+  </div>
+
   <!-- Title bar -->
   <header class="titlebar">
     <div class="titlebar__brand">
       <img class="logo" src="../build/icon.png" alt="" />
       <span class="titlebar__name">Riot Relay</span>
-      <span class="titlebar__ver" id="app-version-title">1.3.2</span>
+      <span class="titlebar__ver" id="app-version-title">1.3.3</span>
     </div>
 
     <div class="titlebar__spacer"></div>
@@ -32,7 +38,7 @@
       <div class="rail__group">
         <button class="railbtn is-active" data-view="accounts" title="Accounts"><span data-icon="users" data-size="19"></span><span class="railbtn__lbl">Accounts</span></button>
         <button class="railbtn" data-view="inventory" title="Inventory"><span data-icon="package" data-size="19"></span><span class="railbtn__lbl">Inventory</span></button>
-        <button class="railbtn" data-view="chat" title="Chat"><span data-icon="message-circle" data-size="19"></span><span class="railbtn__lbl">Chat</span></button>
+        <button class="railbtn" id="rail-chat" data-view="chat" title="Chat" aria-label="Chat"><span data-icon="message-circle" data-size="19"></span><span class="railbtn__lbl">Chat</span><span class="chat-unread chat-unread--rail" id="rail-chat-badge" aria-hidden="true" hidden></span></button>
         <button class="railbtn" data-view="settings" title="Settings"><span data-icon="settings" data-size="19"></span><span class="railbtn__lbl">Settings</span></button>
       </div>
       <div class="rail__group">
@@ -49,7 +55,7 @@
       </div>
       <div class="search side__search">
         <span class="ic" data-icon="search" data-size="14"></span>
-        <input id="account-search" type="text" placeholder="Search" />
+        <input id="account-search" type="text" placeholder="Search" aria-label="Search accounts" />
       </div>
       <div class="side__list" id="account-list"></div>
     </aside>
@@ -81,7 +87,19 @@
       <div class="chat-identity" id="chat-identity">Riot Client not connected</div>
       <div class="search side__search">
         <span class="ic" data-icon="search" data-size="14"></span>
-        <input id="chat-search" type="text" placeholder="Search friends" />
+        <input id="chat-search" type="text" placeholder="Search friends" aria-label="Search Riot friends" />
+      </div>
+      <div class="chat-tools">
+        <div class="segmented chat-filters" role="group" aria-label="Filter friends">
+          <button type="button" class="is-active" data-chat-filter="all">All</button>
+          <button type="button" data-chat-filter="online">Online</button>
+          <button type="button" data-chat-filter="unread">Unread</button>
+        </div>
+        <select id="chat-sort" class="select" aria-label="Sort friends">
+          <option value="unread">Unread first</option>
+          <option value="status">Online first</option>
+          <option value="name">Name</option>
+        </select>
       </div>
       <div class="side__list chat-friends" id="chat-friends"></div>
     </aside>
@@ -91,6 +109,8 @@
       <div class="side__list">
         <button class="settingnav is-active" data-group="client">Riot Client</button>
         <button class="settingnav" data-group="deceive">Deceive</button>
+        <button class="settingnav" data-group="discord">Discord activity</button>
+        <button class="settingnav" data-group="configs">Config migration</button>
         <button class="settingnav" data-group="privacy">Privacy</button>
         <button class="settingnav" data-group="security">Security</button>
         <button class="settingnav" data-group="catalog">Catalog</button>
@@ -123,7 +143,7 @@
       <div class="workspace-tabs" role="tablist" aria-label="Workspace">
         <button class="workspace-tab is-active" data-view="accounts" role="tab" aria-controls="view-accounts" aria-selected="true"><span data-icon="users" data-size="13"></span>Accounts</button>
         <button class="workspace-tab" data-view="inventory" role="tab" aria-controls="view-inventory" aria-selected="false"><span data-icon="package" data-size="13"></span>Inventory</button>
-        <button class="workspace-tab" data-view="chat" role="tab" aria-controls="view-chat" aria-selected="false"><span data-icon="message-circle" data-size="13"></span>Chat</button>
+        <button class="workspace-tab" id="workspace-chat" data-view="chat" role="tab" aria-controls="view-chat" aria-selected="false" aria-label="Chat" title="Chat"><span data-icon="message-circle" data-size="13"></span>Chat<span class="chat-unread chat-unread--tab" id="workspace-chat-badge" aria-hidden="true" hidden></span></button>
         <button class="workspace-tab" data-view="settings" role="tab" aria-controls="view-settings" aria-selected="false"><span data-icon="settings" data-size="13"></span>Settings</button>
       </div>
 
@@ -148,7 +168,7 @@
           <div class="titlebar__spacer"></div>
           <div class="search">
             <span class="ic" data-icon="search" data-size="14"></span>
-            <input id="inv-search" type="text" placeholder="Search items" />
+            <input id="inv-search" type="text" placeholder="Search items" aria-label="Search inventory items" />
           </div>
           <select id="inv-tier" class="select" aria-label="Inventory tier"><option value="">All tiers</option></select>
         </div>
@@ -165,11 +185,18 @@
       <section class="view" id="view-chat">
         <div class="chat-workspace" id="chat-workspace" hidden>
           <header class="chat-head">
-            <div><strong id="chat-title">Conversation</strong><span id="chat-presence">Current Riot session</span></div>
+            <span class="chat-head__avatar chat-avatar" id="chat-head-avatar">?</span>
+            <div class="chat-head__identity">
+              <strong id="chat-title">Conversation</strong>
+              <span id="chat-presence">Current Riot session</span>
+            </div>
+            <div class="chat-profile-actions" id="chat-profile-actions" aria-label="Friend profiles" hidden></div>
+            <span class="chat-availability" id="chat-availability" hidden></span>
           </header>
           <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
           <form class="chat-composer" id="chat-composer">
             <textarea id="chat-message" rows="1" maxlength="1000" placeholder="Message current friend" aria-label="Chat message"></textarea>
+            <div class="chat-compose-meta"><span>Enter to send · Shift+Enter for newline</span><span id="chat-message-count">0 / 1000</span></div>
             <button class="btn btn--primary" id="btn-chat-send" type="submit"><span data-icon="send" data-size="14"></span>Send</button>
           </form>
         </div>
@@ -187,7 +214,7 @@
           <div class="panel setting-group is-active" data-group="client">
             <h3>Riot Client</h3>
             <div class="field">
-              <label>RiotClientServices.exe path</label>
+              <label for="set-client-path">RiotClientServices.exe path</label>
               <div class="field__row">
                 <input id="set-client-path" type="text" placeholder="Auto-detected if left blank" />
                 <button class="btn btn--ghost" id="btn-pick-client">Browse</button>
@@ -208,6 +235,11 @@
               <input type="checkbox" id="set-minimize-tray" />
               <span class="toggle__track"><span class="toggle__thumb"></span></span>
               <span><b>Minimize to notification area</b><small>Enabled by default. Minimizing hides Riot Relay from the taskbar; restore or quit it from the Windows tray hidden-icons area.</small></span>
+            </label>
+            <label class="toggle toggle--stacked startup-control is-disabled">
+              <input type="checkbox" id="set-startup" disabled />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Auto-launch with Windows</b><small id="startup-status">Checking Windows startup registration…</small></span>
             </label>
           </div>
 
@@ -274,6 +306,112 @@
             <p class="deceive-error" id="deceive-last-error" hidden></p>
           </div>
 
+          <div class="panel setting-group discord-panel" data-group="discord">
+            <div class="feature-panel-head">
+              <div><h3>Discord activity <span class="badge badge--accent">opt in</span></h3><p class="hint">Publishes a customizable Rich Presence through the local Discord desktop pipe. It never sends login names, PUUIDs, tokens, sessions, or credentials.</p></div>
+              <div class="deceive-runtime" id="discord-runtime"><i class="dot dot--off"></i><span>Disabled</span></div>
+            </div>
+            <label class="toggle toggle--stacked">
+              <input type="checkbox" id="set-discord-enabled" />
+              <span class="toggle__track"><span class="toggle__thumb"></span></span>
+              <span><b>Enable Discord Rich Presence</b><small>Disabled by default. Activity is cleared when the vault locks or this option is turned off.</small></span>
+            </label>
+            <div class="field">
+              <label for="set-discord-client-id">Discord Application ID</label>
+              <input id="set-discord-client-id" type="text" inputmode="numeric" maxlength="20" placeholder="17–20 digit application ID" />
+              <p class="hint">Riot Relay only needs the public Application ID from an application you control in the Discord Developer Portal. No client secret, bot token, or Discord login is needed. Riot Relay cannot create that developer application on your behalf.</p>
+            </div>
+            <div class="feature-grid">
+              <label class="toggle"><input type="checkbox" id="set-discord-game" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Active game</span></label>
+              <label class="toggle"><input type="checkbox" id="set-discord-rank" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Verified rank</span></label>
+              <label class="toggle"><input type="checkbox" id="set-discord-riot-id" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Riot ID</span></label>
+              <label class="toggle"><input type="checkbox" id="set-discord-status" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Presence status</span></label>
+              <label class="toggle"><input type="checkbox" id="set-discord-elapsed" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>App elapsed time</span></label>
+            </div>
+            <section class="live-match-options" aria-labelledby="discord-live-title">
+              <label class="toggle toggle--stacked">
+                <input type="checkbox" id="set-discord-live" />
+                <span class="toggle__track"><span class="toggle__thumb"></span></span>
+                <span><b id="discord-live-title">Show current match</b><small>Polls only the verified active PUUID. Unknown fields are omitted; player names, match IDs, party IDs, and opponents are never published.</small></span>
+              </label>
+              <div class="feature-grid" id="discord-live-fields">
+                <label class="toggle"><input type="checkbox" id="set-discord-match-mode" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Mode / queue</span></label>
+                <label class="toggle"><input type="checkbox" id="set-discord-match-map" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Map</span></label>
+                <label class="toggle"><input type="checkbox" id="set-discord-match-phase" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Match phase</span></label>
+                <label class="toggle"><input type="checkbox" id="set-discord-match-score" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Score when available</span></label>
+                <label class="toggle"><input type="checkbox" id="set-discord-match-elapsed" /><span class="toggle__track"><span class="toggle__thumb"></span></span><span>Match elapsed time</span></label>
+              </div>
+              <p class="hint">VALORANT supports queue, map, phase, and relative round score from the current player’s presence. League supports gameflow, queue, map, phase, match time, and the verified active player’s K/D/A; TFT omits fields that are unavailable.</p>
+            </section>
+            <div class="feature-grid feature-grid--fields">
+              <div class="field"><label for="set-discord-details">Custom details</label><input id="set-discord-details" maxlength="128" placeholder="Overrides the game line" /></div>
+              <div class="field"><label for="set-discord-state">Custom state</label><input id="set-discord-state" maxlength="128" placeholder="Overrides rank/status/ID" /></div>
+              <div class="field"><label for="set-discord-image">Large image asset key</label><input id="set-discord-image" maxlength="32" placeholder="Optional uploaded asset key" /></div>
+            </div>
+            <div class="feature-preview" id="discord-preview">Riot Relay activity preview</div>
+            <div class="discord-diagnostics" id="discord-diagnostics" aria-live="polite">Save an Application ID to begin the Discord handshake.</div>
+            <div class="settings-actions"><button class="btn btn--primary" id="btn-discord-save" type="button">Save and refresh</button><button class="btn btn--ghost" id="btn-discord-refresh" type="button">Refresh from Riot</button><button class="btn btn--ghost" id="btn-discord-test" type="button">Test minimal activity</button></div>
+          </div>
+
+          <div class="panel setting-group config-panel" data-group="configs">
+            <div class="feature-panel-head">
+              <div>
+                <h3>VALORANT settings migration</h3>
+                <p class="hint">Copy the <code>Ares.PlayerSettings</code> document returned by Riot Client from one account to another, guarded by exact PUUID checks.</p>
+              </div>
+              <span class="badge badge--accent">cloud</span>
+            </div>
+
+            <div class="config-workflow" id="config-workflow" hidden>
+              <section class="config-step" id="config-step-source">
+                <header><span class="config-step__number">1</span><div><strong>Capture the source</strong><small id="config-source-status">Not captured</small></div></header>
+                <p>Choose the game and account whose preferences you want.</p>
+                <div class="config-step__fields">
+                  <div class="field"><label for="config-game">Game profile</label><select id="config-game" class="select"><option value="valorant">VALORANT</option><option value="lol">League of Legends / TFT</option><option value="lor">Legends of Runeterra</option></select></div>
+                  <div class="field"><label for="config-source">Source account</label><div class="config-account-picker"><select id="config-source" class="select"></select><button class="btn btn--ghost config-use-current" id="btn-config-source-current" type="button">Use signed-in account</button></div></div>
+                </div>
+                <button class="btn btn--ghost" id="btn-config-capture-source" type="button">Capture verified source</button>
+              </section>
+
+              <section class="config-step" id="config-step-target">
+                <header><span class="config-step__number">2</span><div><strong>Capture the target baseline</strong><small id="config-target-status">Waiting for step 1</small></div></header>
+                <p>Select a different account and capture its current baseline. VALORANT can use its validated PUUID-owned Riot folder without launching; other games still require the target account to be active.</p>
+                <div class="field"><label for="config-target">Target account</label><div class="config-account-picker"><select id="config-target" class="select"></select><button class="btn btn--ghost config-use-current" id="btn-config-target-current" type="button">Use signed-in account</button></div></div>
+                <button class="btn btn--ghost" id="btn-config-capture-target" type="button">Capture verified target</button>
+              </section>
+
+              <section class="config-step config-step--review" id="config-step-review">
+                <header><span class="config-step__number">3</span><div><strong>Review and enable</strong><small id="config-review-status">Complete steps 1 and 2</small></div></header>
+                <div class="config-route" id="config-profile-status">Select a source and target to review the route.</div>
+                <ul class="config-safety-list">
+                  <li>A binding does not write files. Use Apply and launch target; Riot Relay first verifies the target PUUID, then writes locally, verifies hashes, and launches the game.</li>
+                  <li>Manual launches outside Riot Relay are not intercepted. Local verification cannot guarantee Riot cloud settings will not overwrite a file later.</li>
+                  <li>A target backup is retained for changed files. VALORANT’s local folder must also be uniquely attributable when captured.</li>
+                </ul>
+                <div class="config-application" id="config-application-status">No local application attempt recorded.</div>
+                <div class="settings-actions">
+                  <button class="btn btn--primary" id="btn-config-migrate" type="button">Save binding</button>
+                  <button class="btn btn--primary" id="btn-config-apply" type="button">Apply and launch target</button>
+                  <button class="btn btn--ghost" id="btn-config-remove" type="button" hidden>Remove binding</button>
+                </div>
+              </section>
+            </div>
+
+            <div class="config-cloud" id="config-cloud">
+              <div class="config-cloud__head">
+                <strong>VALORANT settings migration <span class="badge badge--accent">verified</span></strong>
+                <small>Captures the <code>Ares.PlayerSettings</code> data returned by the running Riot Client. Apply creates a one-level target backup, performs one write, and requires exact same-route read-back. Riot’s endpoint is undocumented and may change; read-back cannot guarantee how a later VALORANT build interprets every field.</small>
+              </div>
+              <div class="warnbox"><span data-icon="shield-alert" data-size="16"></span><span>Sign into the source account and <b>Capture</b>. Then switch to a different target account and <b>Apply</b>. Exact PUUID checks run before and after reads and writes. Restart VALORANT afterward. Restore is available only while the backup owner is signed in.</span></div>
+              <div class="config-cloud__actions">
+                <button class="btn btn--ghost" id="btn-cloud-capture" type="button">Capture signed-in account (source)</button>
+                <button class="btn btn--primary" id="btn-cloud-apply" type="button">Apply source to signed-in account</button>
+                <button class="btn btn--ghost" id="btn-cloud-restore" type="button">Restore signed-in account backup</button>
+              </div>
+              <div class="config-cloud__status" id="config-cloud-status">No source captured yet.</div>
+            </div>
+          </div>
+
           <div class="panel setting-group" data-group="privacy">
             <h3>Identity privacy</h3>
             <p class="hint">These controls affect presentation and exports only. Stored identities and PUUID verification remain unchanged.</p>
@@ -314,7 +452,7 @@
               <p class="key-storage-status" id="hello-status"></p>
             </section>
             <div class="field security-password">
-              <label>Change master password</label>
+              <label for="set-new-master">Change master password</label>
               <div class="field__row">
                 <input id="set-new-master" type="password" placeholder="New master password" />
                 <button class="btn btn--ghost" id="btn-change-master">Update</button>
@@ -334,7 +472,7 @@
             <section class="update-card" aria-live="polite">
               <div class="update-card__head">
                 <span>UPDATE STATUS</span>
-                <b id="update-current-version">Riot Relay 1.3.2</b>
+                <b id="update-current-version">Riot Relay 1.3.3</b>
               </div>
               <strong id="update-status">Preparing update service…</strong>
               <p id="update-detail">Automatic updates are initialized by the desktop process.</p>
@@ -381,7 +519,7 @@
     <span class="titlebar__spacer"></span>
     <span class="status status--deceive" id="status-deceive">Deceive: disabled</span>
     <span class="status status--catalog" id="status-catalog">Catalog: —</span>
-    <span class="status status--version" id="app-version-status">Riot Relay 1.3.2</span>
+    <span class="status status--version" id="app-version-status">Riot Relay 1.3.3</span>
   </footer>
 
   <!-- Account modal -->
@@ -395,15 +533,15 @@
       <div class="modal__body">
         <input type="hidden" id="acc-id" />
         <div class="field">
-          <label>Display label</label>
+          <label for="acc-label">Display label</label>
           <input id="acc-label" type="text" placeholder="e.g. Main / Smurf / EU" />
         </div>
         <div class="field">
-          <label>Riot username (for login)</label>
+          <label for="acc-username">Riot username (for login)</label>
           <input id="acc-username" type="text" autocomplete="off" placeholder="Login username" />
         </div>
         <div class="field">
-          <label>Password</label>
+          <label for="acc-password">Password</label>
           <div class="field__row">
             <input id="acc-password" type="password" autocomplete="new-password" placeholder="Stored encrypted (AES-256-GCM)" />
             <button class="iconbtn" id="acc-reveal" type="button" title="Show / hide"><span data-icon="eye" data-size="15"></span></button>
@@ -411,7 +549,7 @@
           <p class="hint">Leave blank when editing to keep the current password.</p>
         </div>
         <div class="field">
-          <label>Verified League platform</label>
+          <label for="acc-league-platform">Verified League platform</label>
           <input id="acc-league-platform" type="text" placeholder="Sync required" readonly />
           <p class="hint">Detected from the PUUID-bound League Client or exact-PUUID provider discovery. It cannot be edited manually.</p>
         </div>
@@ -429,7 +567,7 @@
       <img class="lock__logo brand-mark" src="../build/icon.png" alt="Riot Relay" />
       <h2 id="lock-title">Unlock Riot Relay</h2>
       <p class="muted" id="lock-sub">Enter your master password to decrypt the vault.</p>
-      <input id="lock-password" type="password" placeholder="Master password" autocomplete="off" />
+      <input id="lock-password" type="password" placeholder="Master password" autocomplete="off" aria-label="Master password" />
       <button class="btn btn--primary btn--block" id="lock-submit">Unlock</button>
       <button class="btn btn--ghost btn--block" id="lock-parked" hidden>Use stored key</button>
       <p class="lock__err" id="lock-error" hidden></p>
@@ -458,8 +596,8 @@
       <div class="onboard__step" data-step="1">
         <h2>Create a master password</h2>
         <p class="muted">This encrypts your vault on this device. There's no recovery — keep it somewhere safe.</p>
-        <input id="ob-pass" type="password" placeholder="Master password" autocomplete="new-password" />
-        <input id="ob-pass2" type="password" placeholder="Confirm master password" autocomplete="new-password" />
+        <input id="ob-pass" type="password" placeholder="Master password" autocomplete="new-password" aria-label="Create master password" />
+        <input id="ob-pass2" type="password" placeholder="Confirm master password" autocomplete="new-password" aria-label="Confirm master password" />
         <p class="hint">OS key storage starts disabled. It can be enabled only from Security after this vault is unlocked.</p>
         <p class="lock__err" id="ob-error" hidden></p>
         <div class="onboard__nav"><button class="btn btn--ghost" data-back>Back</button><button class="btn btn--primary" data-next>Continue</button></div>
@@ -469,7 +607,7 @@
         <h2>Locate your Riot Client</h2>
         <p class="muted" id="ob-client-msg">Detecting RiotClientServices.exe…</p>
         <div class="field__row">
-          <input id="ob-client-path" type="text" placeholder="Path to RiotClientServices.exe" />
+          <input id="ob-client-path" type="text" placeholder="Path to RiotClientServices.exe" aria-label="Path to RiotClientServices.exe" />
           <button class="btn btn--ghost" id="ob-browse">Browse</button>
         </div>
         <p class="hint">Needed to launch and switch games. You can change this later in Settings.</p>
@@ -485,38 +623,32 @@
     </div>
   </div>
 
-  <!-- Reusable feature tour -->
-  <div class="onboard feature-tour" id="feature-tour" hidden>
-    <div class="onboard__card feature-tour__card">
-      <img class="onboard__logo brand-mark" src="../build/icon.png" alt="Riot Relay" />
-      <button class="iconbtn feature-tour__close" id="tour-skip" type="button" aria-label="Close tutorial"><span data-icon="x" data-size="15"></span></button>
-      <div class="onboard__steps" id="tour-dots"></div>
-
-      <div class="tour__step is-active" data-tour-step="0">
-        <span class="tour__eyebrow">1 · Accounts</span><h2>Every identity stays separate</h2>
-        <p class="muted">Add login credentials once, then sync while that account is active. Riot ID and PUUID verification prevent ranks, inventories, portraits, and sessions from attaching to the wrong roster entry.</p>
-        <div class="tour__callout"><span data-icon="shield-check" data-size="18"></span><b>PUUID is always authoritative.</b></div>
+  <!-- Reusable feature spotlight tour -->
+  <div class="feature-tour" id="feature-tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" aria-describedby="tour-body" hidden>
+    <div class="feature-tour__scrim" data-tour-scrim="top"></div>
+    <div class="feature-tour__scrim" data-tour-scrim="left"></div>
+    <div class="feature-tour__scrim" data-tour-scrim="right"></div>
+    <div class="feature-tour__scrim" data-tour-scrim="bottom"></div>
+    <div class="feature-tour__spotlight" id="tour-spotlight" aria-hidden="true"></div>
+    <section class="feature-tour__card" id="tour-card" tabindex="-1">
+      <header class="feature-tour__head">
+        <span class="tour__eyebrow" id="tour-eyebrow">Feature tour</span>
+        <button class="iconbtn feature-tour__close" id="tour-skip" type="button" aria-label="Close feature tour"><span data-icon="x" data-size="15"></span></button>
+      </header>
+      <div class="onboard__steps feature-tour__dots" id="tour-dots" aria-label="Feature tour steps"></div>
+      <div class="tour__step is-active">
+        <h2 id="tour-title" tabindex="-1">Explore Riot Relay</h2>
+        <p class="muted" id="tour-body">Browse the highlighted menus to learn what each workspace does.</p>
+        <div class="tour__callout" id="tour-callout" hidden></div>
       </div>
-      <div class="tour__step" data-tour-step="1">
-        <span class="tour__eyebrow">2 · Switching</span><h2>Switch only—or launch a game</h2>
-        <p class="muted">Switch session changes the Riot account without launching a game. The VALORANT, League, and TFT actions switch and launch explicitly. If Riot asks for 2FA, enter it in Riot Client; the manager waits without restarting it.</p>
+      <div class="onboard__nav feature-tour__nav">
+        <button class="btn btn--ghost" id="tour-back" type="button">Previous</button>
+        <span class="feature-tour__counter" id="tour-counter" aria-live="polite"></span>
+        <span class="titlebar__spacer"></span>
+        <button class="btn btn--primary" id="tour-next" type="button">Next</button>
+        <button class="btn btn--primary" id="tour-finish" type="button" hidden>Finish tour</button>
       </div>
-      <div class="tour__step" data-tour-step="2">
-        <span class="tour__eyebrow">3 · Stats</span><h2>One unified account view</h2>
-        <p class="muted">VALORANT, League, and TFT ranks appear together. League rank uses an exact-identity OP.GG lookup and verified League Client data as fallback. The Chat workspace shows friends and messages for only the currently authenticated Riot account.</p>
-      </div>
-      <div class="tour__step" data-tour-step="3">
-        <span class="tour__eyebrow">4 · Inventory</span><h2>Browse, value, and export</h2>
-        <p class="muted">Load supported inventories, sort League skins by rarity, inspect chromas, emotes, icons, wards, TFT arenas and finishers, estimate VALORANT VP or League RP value, and export data or collection images.</p>
-      </div>
-      <div class="tour__step" data-tour-step="4">
-        <span class="tour__eyebrow">5 · Deceive</span><h2>Control how friends see you</h2>
-        <p class="muted">Choose Offline, Mobile, Away, or Online; optionally hide game activity while preserving parties. The chat helper works in League. VALORANT validates real backend contacts, so use the in-app controls there.</p>
-        <div class="tour__callout"><span data-icon="eye-off" data-size="18"></span><b>Restart Riot after enabling Deceive for the first time.</b></div>
-      </div>
-
-      <div class="onboard__nav feature-tour__nav"><button class="btn btn--ghost" id="tour-back" type="button">Back</button><span class="titlebar__spacer"></span><button class="btn btn--primary" id="tour-next" type="button">Next</button><button class="btn btn--primary" id="tour-finish" type="button" hidden>Finish tour</button></div>
-    </div>
+    </section>
   </div>
 
   <!-- Switch overlay -->

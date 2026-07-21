@@ -24,6 +24,21 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+## League ranked emblems
+
+League and TFT rank cards load Riot's ranked-emblem artwork from the
+[magisteriis/lol-icons-and-emblems](https://github.com/magisteriis/lol-icons-and-emblems)
+archive through jsDelivr. The archive identifies the artwork as originating from
+Riot's developer assets and publishes the mirror under the Unlicense. Riot Relay
+pins the archive revision and provides a generated fallback when an image is
+unavailable.
+
+Because that pre-Emerald archive has no Emerald tier, `renderer/emerald-rank.png`
+is a local 512 × 585 adaptation generated from Riot's current Emerald emblem as
+distributed by [CommunityDragon](https://raw.communitydragon.org/). Its transparent
+canvas and visible footprint were normalized to match the archived emblem set;
+the underlying artwork remains property of Riot Games.
+
 ## Product disclaimer
 
 Riot Relay is not endorsed by Riot Games and does not reflect the

@@ -170,102 +170,858 @@ function remoteText(url, allowedHosts, label) {
   });
 }
 
-function exactRiotId(row, gameName, tagLine) {
-  return row && String(row.game_name || '').trim().toLowerCase() === gameName.toLowerCase()
-    && String(row.tagline || '').trim().toLowerCase() === tagLine.toLowerCase();
+const PROVIDER_ROW_LIMIT = 100;
+const PROVIDER_SEASON_LIMIT = 20;
+const PROVIDER_TEXT_LIMIT = 256;
+
+function aliasValue(row, aliases) {
+  if (!row || typeof row !== 'object') return undefined;
+  for (const key of aliases) {
+    if (Object.prototype.hasOwnProperty.call(row, key) && row[key] !== undefined && row[key] !== null) return row[key];
+  }
+  return undefined;
 }
 
-/** Identity-verified League rank lookup through OP.GG's undocumented JSON service. */
-async function fetchOpggStats(riotId, platform, expectedPuuid) {
+function providerText(value, limit = PROVIDER_TEXT_LIMIT) {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  return String(value).trim().slice(0, limit);
+}
+
+function providerRiotIdentity(row) {
+  let gameName = providerText(aliasValue(row, ['game_name', 'gameName']), 128);
+  let tagLine = providerText(aliasValue(row, ['tagline', 'tag_line', 'tagLine']), 128);
+  const complete = providerText(aliasValue(row, ['riot_id', 'riotId']), 260);
+  const separator = complete.lastIndexOf('#');
+  if (separator > 0 && separator < complete.length - 1) {
+    if (!gameName) gameName = complete.slice(0, separator).trim().slice(0, 128);
+    if (!tagLine) tagLine = complete.slice(separator + 1).trim().slice(0, 128);
+  }
+  return { gameName, tagLine };
+}
+
+function providerPuuid(row) {
+  // Only OP.GG's explicit Riot PUUID field is identity evidence. Provider-local
+  // player_uuid/playerUuid values must never reject direct data or discover a platform.
+  return providerText(aliasValue(row, ['puuid', 'PUUID']));
+}
+
+function providerSummonerId(row) {
+  return providerText(aliasValue(row, ['summoner_id', 'summonerId']));
+}
+
+function exactRiotId(row, gameName, tagLine) {
+  const identity = providerRiotIdentity(row);
+  return identity.gameName.toLowerCase() === gameName.toLowerCase()
+    && identity.tagLine.toLowerCase() === tagLine.toLowerCase();
+}
+
+const PROVIDER_ENVELOPE_KEYS = [
+  'data', 'result', 'response', 'payload', 'content', 'props', 'pageProps', 'dehydratedState', 'state',
+];
+
+function explicitProviderEnvelopes(payload) {
+  if (!payload || typeof payload !== 'object') return [];
+  const envelopes = [];
+  const pending = [{ value: payload, depth: 0 }];
+  const seen = new Set();
+  while (pending.length && envelopes.length < PROVIDER_ROW_LIMIT) {
+    const { value, depth } = pending.shift();
+    if (!value || typeof value !== 'object' || seen.has(value)) continue;
+    seen.add(value);
+    envelopes.push(value);
+    if (depth >= 4) continue;
+    for (const key of PROVIDER_ENVELOPE_KEYS) {
+      const nested = value[key];
+      if (nested && typeof nested === 'object') pending.push({ value: nested, depth: depth + 1 });
+    }
+  }
+  return envelopes;
+}
+
+function opggSearchRows(payload) {
+  for (const envelope of explicitProviderEnvelopes(payload)) {
+    const collections = [envelope, envelope.summoners, envelope.items, envelope.results, envelope.rows];
+    const rows = collections.find(Array.isArray);
+    if (rows) return rows.slice(0, PROVIDER_ROW_LIMIT);
+  }
+  return null;
+}
+
+function opggSummarySummoner(payload) {
+  for (const envelope of explicitProviderEnvelopes(payload)) {
+    for (const key of ['summoner', 'profile', 'summonerProfile']) {
+      if (envelope[key] && typeof envelope[key] === 'object' && !Array.isArray(envelope[key])) {
+        const identity = providerRiotIdentity(envelope[key]);
+        if (identity.gameName && identity.tagLine) return envelope[key];
+      }
+    }
+    const identity = providerRiotIdentity(envelope);
+    if (identity.gameName && identity.tagLine) return envelope;
+  }
+  return null;
+}
+
+function finiteProviderNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+const PROVIDER_QUEUE_TYPES = {
+  SOLORANKED: 'RANKED_SOLO_5x5',
+  RANKED_SOLO_5X5: 'RANKED_SOLO_5x5',
+  FLEXRANKED: 'RANKED_FLEX_SR',
+  RANKED_FLEX_SR: 'RANKED_FLEX_SR',
+  RANKED_TFT: 'RANKED_TFT',
+  RANKED_TFT_DOUBLE_UP: 'RANKED_TFT_DOUBLE_UP',
+};
+const PROVIDER_HISTORY_KEYS = [
+  'previous_seasons', 'previousSeasons', 'past_seasons', 'pastSeasons', 'season_history', 'seasonHistory',
+  'previous_season_tiers', 'previousSeasonTiers', 'previous_tiers', 'previousTiers', 'past_ranks', 'pastRanks',
+  'previous_season', 'previousSeason', 'past_season', 'pastSeason', 'previous_season_tier', 'previousSeasonTier',
+];
+
+function providerQueueType(row, fallback = '') {
+  const raw = providerText(aliasValue(row, ['game_type', 'gameType', 'queue_type', 'queueType', 'queue', 'queue_id', 'queueId']), 64)
+    .toUpperCase();
+  return PROVIDER_QUEUE_TYPES[raw] || PROVIDER_QUEUE_TYPES[String(fallback || '').toUpperCase()] || '';
+}
+
+function providerRankedQueue(row, fallbackQueue = '') {
+  if (!row || typeof row !== 'object') return null;
+  const queue = providerQueueType(row, fallbackQueue);
+  if (!queue) return null;
+  const tierInfo = aliasValue(row, ['tier_info', 'tierInfo']);
+  const rank = tierInfo && typeof tierInfo === 'object' ? tierInfo : row;
+  const rawTier = aliasValue(rank, ['tier', 'tier_name', 'tierName']) ?? aliasValue(row, ['tier', 'tier_name', 'tierName']);
+  // Placeholder queue objects are common in OP.GG/LCU payloads. Only an
+  // explicit tier is rank evidence; explicit UNRANKED remains authoritative.
+  if (rawTier === undefined || rawTier === null || !String(rawTier).trim()) return null;
+  const rawDivision = aliasValue(rank, ['division', 'rank']) ?? aliasValue(row, ['division', 'rank']);
+  const numericDivision = Number(rawDivision);
+  const division = ROMAN_DIVISION[numericDivision] || providerText(rawDivision, 8).toUpperCase();
+  return normalizeRankedQueue({
+    queueType: queue,
+    tier: aliasValue(rank, ['tier', 'tier_name', 'tierName']) ?? aliasValue(row, ['tier', 'tier_name', 'tierName']),
+    division,
+    leaguePoints: aliasValue(rank, ['lp', 'league_points', 'leaguePoints', 'ranked_rating', 'rankedRating'])
+      ?? aliasValue(row, ['lp', 'league_points', 'leaguePoints', 'ranked_rating', 'rankedRating']),
+    wins: aliasValue(row, ['win', 'wins']),
+    losses: aliasValue(row, ['lose', 'loss', 'losses']),
+  });
+}
+
+function providerBoolean(row, aliases) {
+  const value = aliasValue(row, aliases);
+  if (value === true || value === 1 || String(value).toLowerCase() === 'true') return true;
+  if (value === false || value === 0 || String(value).toLowerCase() === 'false') return false;
+  return null;
+}
+
+function historicalProviderRecord(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (providerBoolean(row, ['is_current', 'isCurrent', 'current']) === false) return true;
+  const status = providerText(aliasValue(row, ['status', 'season_status', 'seasonStatus']), 32).toLowerCase();
+  return /^(?:past|previous|historical|finished|ended)$/.test(status);
+}
+
+function providerCollectionRows(value, inherited = {}, depth = 0) {
+  if (!value || depth > 4) return [];
+  if (Array.isArray(value)) {
+    return value.slice(0, PROVIDER_ROW_LIMIT).flatMap((row) => providerCollectionRows(row, inherited, depth + 1))
+      .slice(0, PROVIDER_ROW_LIMIT);
+  }
+  if (typeof value !== 'object') return [];
+  const looksRanked = aliasValue(value, ['tier', 'tier_name', 'tierName', 'tier_info', 'tierInfo']) !== undefined;
+  if (looksRanked) return [{ ...inherited, ...value }];
+  const rows = [];
+  for (const [key, nested] of Object.entries(value).slice(0, PROVIDER_ROW_LIMIT)) {
+    if (!nested || (typeof nested !== 'object' && !Array.isArray(nested))) continue;
+    const queue = PROVIDER_QUEUE_TYPES[String(key).toUpperCase()];
+    const currentCollection = /^(?:current|current_season|currentSeason)$/i.test(key);
+    const historicalCollection = /^(?:history|previous|past|previous_seasons|previousSeasons|past_seasons|pastSeasons)$/i.test(key);
+    const genericCollection = /^(?:data|items|rows|seasons|ranking|rankings|entry|entries)$/i.test(key);
+    let next;
+    if (queue) next = { ...inherited, queue_type: inherited.queue_type || queue };
+    else if (currentCollection) next = { ...inherited, is_current: true };
+    else if (historicalCollection) next = { ...inherited, is_current: false };
+    else if (genericCollection) next = inherited;
+    else next = { ...inherited, season_id: inherited.season_id || providerText(key, 128) };
+    rows.push(...providerCollectionRows(nested, next, depth + 1));
+    if (rows.length >= PROVIDER_ROW_LIMIT) break;
+  }
+  return rows.slice(0, PROVIDER_ROW_LIMIT);
+}
+
+function providerSeasonId(row) {
+  const value = aliasValue(row, [
+    'season_id', 'seasonId', 'season', 'season_name', 'seasonName', 'display_name', 'displayName', 'act_id', 'actId',
+  ]);
+  if (value && typeof value === 'object') {
+    return providerText(aliasValue(value, ['id', 'season_id', 'seasonId', 'name', 'display_name', 'displayName']), 128);
+  }
+  return providerText(value, 128);
+}
+
+function providerHistoryRows(containers, currentRows = []) {
+  const rows = [];
+  const append = (collection, inherited = {}) => {
+    rows.push(...providerCollectionRows(collection, inherited));
+  };
+  for (const container of containers) {
+    if (!container || typeof container !== 'object') continue;
+    for (const key of PROVIDER_HISTORY_KEYS) append(container[key]);
+  }
+  for (const row of currentRows.slice(0, PROVIDER_ROW_LIMIT)) {
+    const queue = providerQueueType(row);
+    for (const key of PROVIDER_HISTORY_KEYS) append(row && row[key], queue ? { queue_type: queue } : {});
+  }
+  return rows.slice(0, PROVIDER_ROW_LIMIT);
+}
+
+function normalizedPastSeasons(rows, fallbackQueue = '') {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows.slice(0, PROVIDER_ROW_LIMIT)) {
+    const rank = providerRankedQueue(row, fallbackQueue);
+    if (!rank) continue;
+    const seasonId = providerSeasonId(row) || null;
+    const key = `${seasonId || ''}|${rank.queue}|${rank.tier}|${rank.division}|${rank.lp ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ seasonId, ...rank });
+    if (result.length >= PROVIDER_SEASON_LIMIT) break;
+  }
+  return result;
+}
+
+function dedupeCurrentQueues(rows) {
+  const queues = new Map();
+  const score = (row) => Number(row.tier && row.tier !== 'UNRANKED') * 4
+    + Number(Boolean(row.division)) * 2 + Number(row.lp !== null) + Number(row.wins !== null || row.losses !== null);
+  for (const row of rows) {
+    if (!row || !row.queue) continue;
+    const current = queues.get(row.queue);
+    if (!current || score(row) > score(current)) queues.set(row.queue, row);
+  }
+  return [...queues.values()];
+}
+
+function opggLeaguePayload(summoner, summary) {
+  const containers = [summoner, ...explicitProviderEnvelopes(summary)]
+    .filter((value, index, all) => value && typeof value === 'object' && all.indexOf(value) === index);
+  const leagueStats = containers.map((value) => aliasValue(value, ['league_stats', 'leagueStats']))
+    .find((value) => value && typeof value === 'object');
+  const rows = providerCollectionRows(leagueStats || {});
+  const currentRows = rows.filter((row) => !historicalProviderRecord(row));
+  const historyRows = rows.filter(historicalProviderRecord);
+  historyRows.push(...providerHistoryRows(containers, rows));
+  return {
+    queues: dedupeCurrentQueues(currentRows.map((row) => providerRankedQueue(row)).filter(Boolean)),
+    pastSeasons: normalizedPastSeasons(historyRows, 'RANKED_SOLO_5x5'),
+  };
+}
+
+function checkedProviderPuuid(rows, expectedPuuid, _label, _options = {}) {
+  // Weakened per product decision: an exact, globally-unique Riot ID match on a
+  // resolved platform is accepted even when OP.GG's indexed PUUID is stale,
+  // absent, or mismatched (common for unlinked/not-recently-updated profiles).
+  // We still surface whether the provider PUUID corroborated the identity so
+  // callers can prefer a corroborated platform during discovery.
+  const wanted = providerText(expectedPuuid).toLowerCase();
+  const present = rows.map(providerPuuid).filter(Boolean);
+  const matching = present.find((value) => value.toLowerCase() === wanted) || null;
+  return { providerPuuid: matching || present[0] || null, corroborated: Boolean(matching) };
+}
+
+/** Exact-Riot-ID League rank lookup on an already trusted canonical platform. */
+async function fetchOpggStats(riotId, platform, expectedPuuid, options = {}) {
   const platformId = canonicalLeaguePlatform(platform);
   if (!platformId) throw new Error('A canonical League platform is required before contacting OP.GG.');
-  const wantedPuuid = String(expectedPuuid || '').trim().toLowerCase();
-  if (!wantedPuuid) throw new Error('An expected PUUID is required for an identity-verified OP.GG lookup.');
+  const wantedPuuid = providerText(expectedPuuid).toLowerCase();
+  if (!wantedPuuid) throw new Error('An expected live PUUID is required for an identity-verified OP.GG lookup.');
+  const requireProviderPuuid = options.requireProviderPuuid === true;
   const { gameName, tagLine } = splitRiotId(riotId);
   const regionSlug = OPGG_REGIONS[platformId];
   const searchUrl = new URL(`https://${OPGG_API_HOST}/api/v3/${regionSlug}/summoners`);
   searchUrl.searchParams.set('riot_id', `${gameName}#${tagLine}`);
   searchUrl.searchParams.set('hl', 'en_US');
   const search = await remoteJson(searchUrl, new Set([OPGG_API_HOST]), 'OP.GG');
-  const exactMatches = Array.isArray(search && search.data)
-    ? search.data.filter((row) => exactRiotId(row, gameName, tagLine) && row.summoner_id)
-    : [];
-  const match = exactMatches.find((row) => String(row.puuid || '').trim().toLowerCase() === wantedPuuid)
-    || exactMatches.find((row) => !String(row.puuid || '').trim());
-  if (!match) {
-    if (exactMatches.length) throw new Error('OP.GG exact Riot ID matches did not contain the requested PUUID in this platform.');
-    throw new Error('OP.GG did not return an exact match for the requested Riot ID.');
+  const rows = opggSearchRows(search);
+  if (!rows) throw new Error('OP.GG search response schema was not recognized.');
+  const riotIdMatches = rows.filter((row) => exactRiotId(row, gameName, tagLine));
+  if (!riotIdMatches.length) throw new Error('OP.GG did not return an exact match for the requested Riot ID.');
+  const identifiedMatches = riotIdMatches.filter((row) => providerSummonerId(row));
+  if (!identifiedMatches.length) throw new Error('OP.GG exact Riot ID search rows were missing a usable summoner identifier.');
+
+  const candidates = [...new Map(identifiedMatches.map((row) => [providerSummonerId(row), row])).values()].slice(0, 10);
+
+  const candidateErrors = [];
+  const verified = [];
+  for (const match of candidates) {
+    try {
+      const summonerId = providerSummonerId(match);
+      const summaryUrl = new URL(`https://${OPGG_API_HOST}/api/${regionSlug}/summoners/${encodeURIComponent(summonerId)}/summary`);
+      summaryUrl.searchParams.set('hl', 'en_US');
+      const summary = await remoteJson(summaryUrl, new Set([OPGG_API_HOST]), 'OP.GG');
+      const summoner = opggSummarySummoner(summary);
+      if (!summoner) throw new Error('OP.GG summary response schema was not recognized.');
+      if (!exactRiotId(summoner, gameName, tagLine)) throw new Error('OP.GG summary identity did not match the requested Riot ID.');
+      // Search rows only locate exact-Riot-ID summary candidates. A matching
+      // provider PUUID corroborates the identity; a stale/absent one no longer
+      // rejects the exact Riot ID match.
+      const puuidCheck = checkedProviderPuuid([summoner], wantedPuuid, 'OP.GG');
+      const providerPuuidValue = puuidCheck.providerPuuid;
+      const providerPuuidCorroborated = puuidCheck.corroborated;
+      const identity = providerRiotIdentity(summoner);
+      const level = finiteProviderNumber(aliasValue(summoner, ['level', 'summoner_level', 'summonerLevel']))
+        ?? finiteProviderNumber(aliasValue(match, ['level', 'summoner_level', 'summonerLevel']))
+        ?? 0;
+      const ranked = opggLeaguePayload(summoner, summary);
+      verified.push({
+        available: true,
+        providerPuuid: providerPuuidValue,
+        providerPuuidCorroborated,
+        riotId: `${identity.gameName}#${identity.tagLine}`,
+        platformId,
+        level,
+        profileIconId: null,
+        queues: ranked.queues,
+        pastSeasons: ranked.pastSeasons,
+        source: 'opgg',
+        profileUrl: opggProfileUrl(riotId, platformId),
+        approximate: false,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      candidateErrors.push(error && error.message ? error.message : 'OP.GG summary lookup failed.');
+    }
   }
 
-  const summaryUrl = new URL(`https://${OPGG_API_HOST}/api/${regionSlug}/summoners/${encodeURIComponent(match.summoner_id)}/summary`);
-  summaryUrl.searchParams.set('hl', 'en_US');
-  const summary = await remoteJson(summaryUrl, new Set([OPGG_API_HOST]), 'OP.GG');
-  const summoner = summary && summary.data && summary.data.summoner;
-  if (!exactRiotId(summoner, gameName, tagLine)) throw new Error('OP.GG summary identity did not match the requested Riot ID.');
-  if (summoner.puuid && String(summoner.puuid).trim().toLowerCase() !== wantedPuuid) {
-    throw new Error('OP.GG search and summary PUUIDs did not match the requested identity.');
+  // Prefer a PUUID-corroborated summary; otherwise a single exact Riot ID
+  // summary on this platform is accepted (weakened verification).
+  const corroborated = verified.filter((value) => value.providerPuuidCorroborated);
+  if (corroborated.length === 1) return corroborated[0];
+  if (corroborated.length > 1) {
+    throw new Error('OP.GG returned multiple corroborated exact Riot ID summaries on the verified platform.');
   }
-  const puuid = summoner.puuid || match.puuid;
-  if (!puuid || String(puuid).trim().toLowerCase() !== wantedPuuid) {
-    throw new Error('OP.GG returned a different or missing requested PUUID for this platform.');
+  if (verified.length === 1) return verified[0];
+  if (verified.length > 1) {
+    throw new Error('OP.GG returned multiple indistinguishable exact Riot ID summaries on the verified platform.');
   }
-  const queueTypes = { SOLORANKED: 'RANKED_SOLO_5x5', FLEXRANKED: 'RANKED_FLEX_SR' };
-  const queues = (Array.isArray(summoner.league_stats) ? summoner.league_stats : [])
-    .filter((row) => queueTypes[row.game_type])
-    .map((row) => {
-      const tier = row.tier_info || {};
-      const division = Number(tier.division);
-      return {
-        queue: queueTypes[row.game_type],
-        tier: tier.tier ? String(tier.tier).toUpperCase() : 'UNRANKED',
-        division: ROMAN_DIVISION[division] || '',
-        lp: tier.lp == null || tier.lp === '' ? null : (Number.isFinite(Number(tier.lp)) ? Number(tier.lp) : null),
-        wins: row.win == null || row.win === '' ? null : (Number.isFinite(Number(row.win)) ? Number(row.win) : null),
-        losses: row.lose == null || row.lose === '' ? null : (Number.isFinite(Number(row.lose)) ? Number(row.lose) : null),
-      };
-    });
-  return {
-    available: true,
-    puuid,
-    riotId: `${summoner.game_name}#${summoner.tagline}`,
-    platformId,
-    level: Number(summoner.level || match.level || 0),
-    profileIconId: null,
-    queues,
-    source: 'opgg',
-    profileUrl: opggProfileUrl(riotId, platformId),
-    approximate: false,
-    updatedAt: new Date().toISOString(),
-  };
+  const preferredError = candidateErrors.find((message) => /ambiguous/i.test(message))
+    || candidateErrors.find((message) => /schema|identity/i.test(message))
+    || candidateErrors[0];
+  throw new Error(preferredError || 'OP.GG exact Riot ID matches could not be identity verified.');
 }
 
-async function fetchOpggTftStats(riotId, platform, expectedPuuid) {
+function extractBalancedObject(text, start, maxLength = 12000) {
+  if (start < 0 || text[start] !== '{') return '';
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  const endLimit = Math.min(text.length, start + maxLength);
+  for (let index = start; index < endLimit; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === '{') depth += 1;
+    else if (char === '}' && --depth === 0) return text.slice(start, index + 1);
+  }
+  return '';
+}
+
+function parsedObjectsForKeys(text, keys) {
+  const keyPattern = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const matches = text.matchAll(new RegExp(`"(?:${keyPattern})"\\s*:`, 'g'));
+  const starts = new Set();
+  const objects = [];
+  for (const match of matches) {
+    let start = text.lastIndexOf('{', match.index);
+    for (let attempt = 0; start >= 0 && attempt < 20; attempt += 1) {
+      const block = extractBalancedObject(text, start);
+      if (block && start + block.length > match.index) {
+        if (!starts.has(start)) {
+          starts.add(start);
+          try {
+            const value = JSON.parse(block);
+            if (value && typeof value === 'object' && !Array.isArray(value)) objects.push(value);
+          } catch { /* Provider fragments outside parseable objects are ignored. */ }
+        }
+        break;
+      }
+      start = text.lastIndexOf('{', start - 1);
+    }
+  }
+  return objects.slice(0, PROVIDER_ROW_LIMIT);
+}
+
+function parseStructuredJson(value) {
+  let current = value;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (typeof current !== 'string') return current && typeof current === 'object' ? current : null;
+    const text = current.trim();
+    if (!text || text.length > REMOTE_MAX_BYTES) return null;
+    try { current = JSON.parse(text); }
+    catch { return null; }
+  }
+  return current && typeof current === 'object' ? current : null;
+}
+
+function structuredStringFragments(root) {
+  const fragments = [];
+  const pending = [{ value: root, depth: 0 }];
+  let visited = 0;
+  while (pending.length && visited < PROVIDER_ROW_LIMIT * 5 && fragments.length < PROVIDER_ROW_LIMIT) {
+    const { value, depth } = pending.shift();
+    visited += 1;
+    if (typeof value === 'string') {
+      const parsed = parseStructuredJson(value);
+      if (parsed) fragments.push(parsed);
+      else fragments.push(...parsedObjectsForKeys(value, ['game_name', 'gameName', 'riot_id', 'riotId']));
+      continue;
+    }
+    if (!value || typeof value !== 'object' || depth >= 6) continue;
+    const children = Array.isArray(value) ? value.slice(0, PROVIDER_ROW_LIMIT) : Object.values(value).slice(0, PROVIDER_ROW_LIMIT);
+    for (const nested of children) pending.push({ value: nested, depth: depth + 1 });
+  }
+  return fragments.slice(0, PROVIDER_ROW_LIMIT);
+}
+
+const FLIGHT_SCRIPT_LIMIT = 500;
+const FLIGHT_TOTAL_TEXT_LIMIT = 2 * 1024 * 1024;
+const FLIGHT_RECORD_TEXT_LIMIT = 256 * 1024;
+const FLIGHT_RECORD_LIMIT = PROVIDER_ROW_LIMIT * 2;
+const FLIGHT_VALUE_DEPTH_LIMIT = 24;
+const FLIGHT_VALUE_NODE_LIMIT = 5000;
+const FLIGHT_RESOLVE_NODE_LIMIT = 10000;
+const FLIGHT_REFERENCE_PATH_SEGMENT_LIMIT = 24;
+const FLIGHT_REFERENCE_PATH_SEGMENT_LENGTH_LIMIT = 64;
+const FLIGHT_REFERENCE_PATH_LENGTH_LIMIT = 512;
+const FLIGHT_REFERENCE = /^\$([0-9a-f]{1,8})(?::([\s\S]*))?$/i;
+const FLIGHT_FORBIDDEN_PATH_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function parsedFlightReference(value) {
+  const reference = value.match(FLIGHT_REFERENCE);
+  if (!reference) return null;
+  if (reference[2] === undefined) return { id: reference[1].toLowerCase(), segments: [] };
+  const path = reference[2];
+  const segments = path.split(':');
+  if (!path || path.length > FLIGHT_REFERENCE_PATH_LENGTH_LIMIT
+    || segments.length > FLIGHT_REFERENCE_PATH_SEGMENT_LIMIT
+    || segments.some((segment) => !segment
+      || segment.length > FLIGHT_REFERENCE_PATH_SEGMENT_LENGTH_LIMIT
+      || !/^[A-Za-z0-9_-]+$/.test(segment)
+      || FLIGHT_FORBIDDEN_PATH_KEYS.has(segment))) return { invalid: true };
+  return { id: reference[1].toLowerCase(), segments };
+}
+
+function outlinedFlightValue(value, segments, records, state, depth) {
+  let current = value;
+  let currentDepth = depth;
+  const traversedReferences = [];
+  const failed = () => {
+    for (const id of traversedReferences) state.path.delete(id);
+    return { ok: false };
+  };
+  for (const segment of segments) {
+    while (typeof current === 'string') {
+      state.nodes += 1;
+      const reference = parsedFlightReference(current);
+      if (state.nodes > FLIGHT_RESOLVE_NODE_LIMIT || currentDepth > FLIGHT_VALUE_DEPTH_LIMIT
+        || !reference || reference.invalid || reference.segments.length
+        || !records.has(reference.id) || state.path.has(reference.id)) return failed();
+      state.path.add(reference.id);
+      traversedReferences.push(reference.id);
+      current = records.get(reference.id);
+      currentDepth += 1;
+    }
+    state.nodes += 1;
+    if (state.nodes > FLIGHT_RESOLVE_NODE_LIMIT || !current || typeof current !== 'object') return failed();
+    let property = segment;
+    if (Array.isArray(current) && !/^(?:0|[1-9][0-9]*)$/.test(segment)) {
+      // React initializes a raw Flight element tuple ["$", type, key, props]
+      // before applying outlined property paths. Mirror only those stable,
+      // non-executable structural aliases; all other array properties fail
+      // closed rather than searching arbitrary descendants.
+      if (current.length < 4 || current[0] !== '$') return failed();
+      const elementProperties = { type: '1', key: '2', props: '3' };
+      property = elementProperties[segment];
+      if (property === undefined) return failed();
+    }
+    if (!Object.prototype.hasOwnProperty.call(current, property)) return failed();
+    current = current[property];
+  }
+  return { ok: true, value: current, depth: currentDepth, traversedReferences };
+}
+
+function boundedFlightValue(value) {
+  const pending = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (pending.length) {
+    const current = pending.shift();
+    nodes += 1;
+    if (nodes > FLIGHT_VALUE_NODE_LIMIT || current.depth > FLIGHT_VALUE_DEPTH_LIMIT) return false;
+    if (!current.value || typeof current.value !== 'object') continue;
+    const children = Array.isArray(current.value) ? current.value : Object.values(current.value);
+    if (children.length > PROVIDER_ROW_LIMIT) return false;
+    for (const child of children) pending.push({ value: child, depth: current.depth + 1 });
+  }
+  return true;
+}
+
+function boundedFlightPacketStrings(html) {
+  const packetStrings = [];
+  let totalLength = 0;
+  let scriptCount = 0;
+  const scripts = String(html || '').matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi);
+  for (const match of scripts) {
+    scriptCount += 1;
+    if (scriptCount > FLIGHT_SCRIPT_LIMIT) return null;
+    const body = match[1].trim();
+    const push = body.match(/^self\.__next_f\.push\(([\s\S]*)\)\s*;?$/);
+    if (!push) continue;
+    const packet = parseStructuredJson(push[1]);
+    if (!Array.isArray(packet)) continue;
+    for (const value of packet.slice(0, 4)) {
+      if (typeof value !== 'string') continue;
+      totalLength += value.length;
+      if (totalLength > FLIGHT_TOTAL_TEXT_LIMIT) return null;
+      packetStrings.push(value);
+    }
+  }
+  return packetStrings;
+}
+
+function flightRecordMap(packetStrings) {
+  const records = new Map();
+  const duplicates = new Set();
+  for (const line of packetStrings.join('').split('\n')) {
+    const record = line.replace(/\r$/, '').match(/^([0-9a-f]{1,8}):([\s\S]+)$/i);
+    if (!record) continue;
+    if (records.size + duplicates.size >= FLIGHT_RECORD_LIMIT) return null;
+    const id = record[1].toLowerCase();
+    const json = record[2].trim();
+    if (!json || json.length > FLIGHT_RECORD_TEXT_LIMIT) continue;
+    let value;
+    try { value = JSON.parse(json); }
+    catch { continue; }
+    if (!boundedFlightValue(value)) continue;
+    if (records.has(id) || duplicates.has(id)) {
+      records.delete(id);
+      duplicates.add(id);
+    } else {
+      records.set(id, value);
+    }
+  }
+  return records;
+}
+
+function resolvedFlightValue(value, records, state, depth) {
+  state.nodes += 1;
+  if (state.nodes > FLIGHT_RESOLVE_NODE_LIMIT || depth > FLIGHT_VALUE_DEPTH_LIMIT) return { ok: false };
+  if (typeof value === 'string') {
+    const reference = parsedFlightReference(value);
+    if (!reference) return { ok: true, value };
+    if (reference.invalid || !records.has(reference.id) || state.path.has(reference.id)) return { ok: false };
+    state.path.add(reference.id);
+    if (reference.segments.length) {
+      const outlined = outlinedFlightValue(records.get(reference.id), reference.segments, records, state, depth + 1);
+      const resolved = outlined.ok
+        ? resolvedFlightValue(outlined.value, records, state, outlined.depth)
+        : outlined;
+      for (const id of outlined.traversedReferences || []) state.path.delete(id);
+      state.path.delete(reference.id);
+      return resolved;
+    }
+    const resolved = resolvedFlightValue(records.get(reference.id), records, state, depth + 1);
+    state.path.delete(reference.id);
+    return resolved;
+  }
+  if (!value || typeof value !== 'object') return { ok: true, value };
+  const output = Array.isArray(value) ? [] : {};
+  for (const [key, child] of Object.entries(value)) {
+    const resolved = resolvedFlightValue(child, records, state, depth + 1);
+    Object.defineProperty(output, key, {
+      // A broken nested reference is opaque field data, not a reason to discard
+      // independently valid siblings (notably an identity root and its entry).
+      value: resolved.ok ? resolved.value : child,
+      enumerable: true, configurable: true, writable: true,
+    });
+  }
+  return { ok: true, value: output };
+}
+
+function flightValueHasProviderIdentity(value) {
+  const pending = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (pending.length) {
+    const current = pending.shift();
+    nodes += 1;
+    if (nodes > FLIGHT_VALUE_NODE_LIMIT || current.depth > FLIGHT_VALUE_DEPTH_LIMIT) return false;
+    if (!current.value || typeof current.value !== 'object') continue;
+    if (!Array.isArray(current.value)) {
+      const identity = providerRiotIdentity(current.value);
+      if (identity.gameName && identity.tagLine) return true;
+    }
+    const children = Array.isArray(current.value) ? current.value : Object.values(current.value);
+    if (children.length > PROVIDER_ROW_LIMIT) return false;
+    for (const child of children) pending.push({ value: child, depth: current.depth + 1 });
+  }
+  return false;
+}
+
+function resolvedFlightRoots(html) {
+  const packetStrings = boundedFlightPacketStrings(html);
+  if (!packetStrings) return [];
+  const records = flightRecordMap(packetStrings);
+  if (!records) return [];
+  const roots = [];
+  const candidateObjects = new Set();
+  const candidateSignatures = new Set();
+  const rootSignatures = new Set();
+
+  const considerCandidate = (candidate, rootId = null) => {
+    if (!candidate || typeof candidate !== 'object' || candidateObjects.has(candidate)
+      || !flightValueHasProviderIdentity(candidate)) return;
+    if (candidateObjects.size < FLIGHT_RECORD_LIMIT) candidateObjects.add(candidate);
+    let signature;
+    try { signature = JSON.stringify(candidate); }
+    catch { return; }
+    if (candidateSignatures.has(signature) || candidateSignatures.size >= FLIGHT_RECORD_LIMIT) return;
+    candidateSignatures.add(signature);
+
+    const state = { nodes: 0, path: new Set(rootId ? [rootId] : []) };
+    const resolved = resolvedFlightValue(candidate, records, state, 0);
+    if (!resolved.ok || !resolved.value || typeof resolved.value !== 'object'
+      || !flightValueHasProviderIdentity(resolved.value)) return;
+    let rootSignature;
+    try { rootSignature = JSON.stringify(resolved.value); }
+    catch { return; }
+    if (rootSignatures.has(rootSignature)) return;
+    rootSignatures.add(rootSignature);
+    roots.push(resolved.value);
+  };
+
+  for (const [id, value] of records) {
+    considerCandidate(value, id);
+    for (const candidate of structuredStringFragments(value)) considerCandidate(candidate, id);
+    if (roots.length >= PROVIDER_ROW_LIMIT) return roots.slice(0, PROVIDER_ROW_LIMIT);
+  }
+  for (const packetString of packetStrings) {
+    for (const candidate of structuredStringFragments(packetString)) considerCandidate(candidate);
+    if (roots.length >= PROVIDER_ROW_LIMIT) return roots.slice(0, PROVIDER_ROW_LIMIT);
+  }
+  return roots;
+}
+
+function tftStructuredPayloads(html) {
+  const payloads = resolvedFlightRoots(html);
+  const scripts = String(html || '').matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi);
+  for (const match of scripts) {
+    const body = match[1].trim();
+    if (!body || body.length > REMOTE_MAX_BYTES) continue;
+    let parsed = parseStructuredJson(body);
+    if (!parsed) {
+      const callStart = body.indexOf('(');
+      const callEnd = body.lastIndexOf(')');
+      if (callStart >= 0 && callEnd > callStart) parsed = parseStructuredJson(body.slice(callStart + 1, callEnd));
+    }
+    if (!parsed) {
+      const start = body.indexOf('{');
+      parsed = parseStructuredJson(extractBalancedObject(body, start, REMOTE_MAX_BYTES));
+    }
+    if (parsed) {
+      payloads.push(parsed, ...structuredStringFragments(parsed));
+    }
+    if (payloads.length >= PROVIDER_ROW_LIMIT) break;
+  }
+  return payloads.slice(0, PROVIDER_ROW_LIMIT);
+}
+
+function boundedProviderObjects(root) {
+  const objects = [];
+  const pending = [{ value: root, depth: 0, ancestors: [] }];
+  const seen = new Set();
+  while (pending.length && objects.length < PROVIDER_ROW_LIMIT * 5) {
+    const entry = pending.shift();
+    const { value, depth, ancestors } = entry;
+    if (!value || typeof value !== 'object' || seen.has(value)) continue;
+    seen.add(value);
+    if (!Array.isArray(value)) objects.push(entry);
+    if (depth >= 8) continue;
+    const children = Array.isArray(value) ? value.slice(0, PROVIDER_ROW_LIMIT) : Object.entries(value).slice(0, PROVIDER_ROW_LIMIT);
+    for (const child of children) {
+      const key = Array.isArray(value) ? '' : child[0];
+      const nested = Array.isArray(value) ? child : child[1];
+      if (nested && typeof nested === 'object') {
+        pending.push({ value: nested, depth: depth + 1, ancestors: [...ancestors, { value, key }].slice(-4) });
+      }
+    }
+  }
+  return objects;
+}
+
+const TFT_RANK_CONTAINER_KEYS = [
+  'league_stats', 'leagueStats', 'ranked_stats', 'rankedStats', 'queue_stats', 'queueStats', 'queues', 'queueMap',
+  'ranking', 'rankings', 'entry', 'entries', 'previous_seasons', 'previousSeasons',
+  'RANKED_TFT', 'RANKED_TFT_DOUBLE_UP',
+];
+
+function hasTftRankContainer(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  return TFT_RANK_CONTAINER_KEYS.some((key) => row[key] && typeof row[key] === 'object');
+}
+
+function tftExactProfiles(payloads, gameName, tagLine) {
+  const profiles = [];
+  for (const payload of payloads.slice(0, PROVIDER_ROW_LIMIT)) {
+    for (const entry of boundedProviderObjects(payload)) {
+      if (!exactRiotId(entry.value, gameName, tagLine)) continue;
+      let subtree = entry.value;
+      for (let index = entry.ancestors.length - 1; index >= 0; index -= 1) {
+        const ancestor = entry.ancestors[index];
+        if (!/^(?:summoner|profile|player|identity|account)$/i.test(ancestor.key)) break;
+        if (hasTftRankContainer(ancestor.value)) subtree = ancestor.value;
+      }
+      profiles.push({ identity: entry.value, subtree });
+      if (profiles.length >= PROVIDER_ROW_LIMIT) return profiles;
+    }
+  }
+  return profiles;
+}
+
+function tftProfileRankRows(profile) {
+  const rows = [];
+  const roots = profile.subtree === profile.identity ? [profile.identity] : [profile.identity, profile.subtree];
+  for (const root of roots) {
+    if (!root || typeof root !== 'object' || Array.isArray(root)) continue;
+    for (const key of TFT_RANK_CONTAINER_KEYS) {
+      const value = root[key];
+      if (!value || typeof value !== 'object') continue;
+      // Preserve the owning key so queue and previous-season semantics survive
+      // without traversing unrelated siblings such as matchStat page data.
+      rows.push(...providerCollectionRows({ [key]: value }));
+      if (rows.length >= PROVIDER_ROW_LIMIT) return rows.slice(0, PROVIDER_ROW_LIMIT);
+    }
+  }
+  return rows.slice(0, PROVIDER_ROW_LIMIT);
+}
+
+function tftQueuePayload(records, queue, expectedPuuid) {
+  const bounded = records.slice(0, PROVIDER_ROW_LIMIT);
+  checkedProviderPuuid(bounded, expectedPuuid, 'OP.GG TFT');
+  const explicitCurrent = bounded.filter((row) => providerBoolean(row, ['is_current', 'isCurrent', 'current']) === true);
+  const eligible = explicitCurrent.length ? explicitCurrent : bounded.filter((row) => !historicalProviderRecord(row));
+  const rankedEligible = eligible.map((row) => ({ row, rank: providerRankedQueue(row, queue) })).filter((value) => value.rank);
+  const compatibleCurrentRank = (left, right) => left.tier === right.tier
+    && (!left.division || !right.division || left.division === right.division)
+    && (left.lp === null || right.lp === null || left.lp === right.lp);
+  for (let left = 0; left < rankedEligible.length; left += 1) {
+    for (let right = left + 1; right < rankedEligible.length; right += 1) {
+      if (!compatibleCurrentRank(rankedEligible[left].rank, rankedEligible[right].rank)) {
+        throw new Error(`OP.GG TFT returned ambiguous current ${queue} records.`);
+      }
+    }
+  }
+  const rankDetailScore = ({ row, rank }) => Number(Boolean(rank.division)) + Number(rank.lp !== null)
+    + Number(rank.wins !== null) + Number(rank.losses !== null)
+    + Number(providerBoolean(row, ['is_current', 'isCurrent', 'current']) === true);
+  const selected = rankedEligible.reduce((best, candidate) => (
+    !best || rankDetailScore(candidate) > rankDetailScore(best) ? candidate : best
+  ), null);
+  const currentRecord = selected && selected.row;
+  const current = selected && selected.rank;
+  const currentSeasonId = providerSeasonId(currentRecord);
+  const historyRows = providerHistoryRows(bounded);
+  for (const row of bounded) {
+    const seasonId = providerSeasonId(row);
+    if (historicalProviderRecord(row) || (currentSeasonId && seasonId && seasonId !== currentSeasonId)) historyRows.push(row);
+  }
+  return { current, pastSeasons: normalizedPastSeasons(historyRows, queue) };
+}
+
+async function fetchOpggTftStats(riotId, platform, expectedPuuid, options = {}) {
   const platformId = canonicalLeaguePlatform(platform);
   if (!platformId) throw new Error('A canonical League platform is required before contacting OP.GG TFT.');
-  const wantedPuuid = String(expectedPuuid || '').trim().toLowerCase();
-  if (!wantedPuuid) throw new Error('An expected PUUID is required for an identity-verified TFT lookup.');
+  const wantedPuuid = providerText(expectedPuuid).toLowerCase();
+  if (!wantedPuuid) throw new Error('An expected live PUUID is required for an identity-verified TFT lookup.');
   const { gameName, tagLine } = splitRiotId(riotId);
   const regionSlug = OPGG_REGIONS[platformId];
   const html = await remoteText(`https://op.gg/tft/summoners/${regionSlug}/${profileSlug(riotId)}`, new Set(['op.gg']), 'OP.GG TFT');
-  const decoded = html.replace(/\\"/g, '"');
-  const identities = [...decoded.matchAll(/"gameName":"([^"]+)","tagLine":"([^"]+)"/g)];
-  if (!identities.some((match) => match[1].toLowerCase() === gameName.toLowerCase() && match[2].toLowerCase() === tagLine.toLowerCase())) {
-    throw new Error('OP.GG TFT profile identity did not match the requested Riot ID.');
-  }
-  const queues = [];
-  for (const queue of ['RANKED_TFT', 'RANKED_TFT_DOUBLE_UP']) {
-    const matches = [...decoded.matchAll(new RegExp(`"${queue}":\\{([^{}]{1,3000})\\}`, 'g'))];
-    const readFrom = (block, key) => { const found = block.match(new RegExp(`"${key}":"([^"]*)"`)); return found ? found[1] : ''; };
-    const match = matches.find((candidate) => readFrom(candidate[1], 'puuid').toLowerCase() === wantedPuuid);
-    if (!match) {
-      if (matches.length && queue === 'RANKED_TFT') throw new Error('OP.GG TFT returned a different or missing requested PUUID.');
-      continue;
+  const decoded = html.replace(/&quot;|&#34;/g, '"');
+  let payloads = tftStructuredPayloads(decoded);
+  if (!payloads.length) payloads = parsedObjectsForKeys(decoded, ['game_name', 'gameName', 'riot_id', 'riotId']);
+  if (!payloads.length) throw new Error('OP.GG TFT profile response schema was not recognized.');
+  const exactProfiles = tftExactProfiles(payloads, gameName, tagLine);
+  if (!exactProfiles.length) throw new Error('OP.GG TFT profile identity did not match the requested Riot ID.');
+
+  // A Next/React Flight page commonly contains several serializations of the
+  // same profile. Group explicit Riot PUUIDs before deciding whether the Riot
+  // ID is genuinely ambiguous; object count alone is not identity count.
+  const profilePuuids = exactProfiles.map((profile) => providerPuuid(profile.identity));
+  const corroboratedProfiles = exactProfiles.filter((_profile, index) => (
+    profilePuuids[index] && profilePuuids[index].toLowerCase() === wantedPuuid
+  ));
+  const explicitPuuids = new Map();
+  for (const value of profilePuuids.filter(Boolean)) explicitPuuids.set(value.toLowerCase(), value);
+
+  let selectedProfiles;
+  let providerPuuidValue;
+  if (corroboratedProfiles.length) {
+    // Correct explicit PUUID evidence wins. PUUID-less route fragments can
+    // contribute rank fields, while explicit mismatches belong to stale or
+    // unrelated provider records and must never be merged into this identity.
+    selectedProfiles = exactProfiles.filter((_profile, index) => (
+      !profilePuuids[index] || profilePuuids[index].toLowerCase() === wantedPuuid
+    ));
+    providerPuuidValue = providerPuuid(corroboratedProfiles[0].identity);
+  } else {
+    if (explicitPuuids.size > 1) {
+      throw new Error('OP.GG TFT returned ambiguous duplicate exact Riot ID profiles on the verified platform.');
     }
-    const readString = (key) => readFrom(match[1], key);
-    const readNumber = (key) => { const found = match[1].match(new RegExp(`"${key}":(-?\\d+(?:\\.\\d+)?)`)); return found ? Number(found[1]) : null; };
-    queues.push(normalizeRankedQueue({ queueType: queue, tier: readString('tier'), rank: readString('rank'), leaguePoints: readNumber('leaguePoints'), wins: readNumber('wins'), losses: readNumber('losses') }));
+    // Repeated PUUID-less fragments, or repeated copies carrying the same stale
+    // PUUID, are one logical profile. Conflicting current ranks still fail
+    // closed in tftQueuePayload rather than being silently combined.
+    selectedProfiles = exactProfiles;
+    providerPuuidValue = explicitPuuids.values().next().value || null;
   }
-  return { available: true, puuid: expectedPuuid, riotId, platformId, queues, source: 'opgg', updatedAt: new Date().toISOString() };
+  const providerPuuidCorroborated = corroboratedProfiles.length > 0;
+  const profileRows = selectedProfiles.flatMap(tftProfileRankRows).slice(0, PROVIDER_ROW_LIMIT);
+  const queues = [];
+  const pastRows = [];
+  for (const queue of ['RANKED_TFT', 'RANKED_TFT_DOUBLE_UP']) {
+    const records = profileRows.filter((row) => providerQueueType(row) === queue);
+    if (!records.length) continue;
+    const ranked = tftQueuePayload(records, queue, wantedPuuid);
+    if (ranked.current) queues.push(ranked.current);
+    pastRows.push(...ranked.pastSeasons);
+  }
+  const pastSeasons = [];
+  const seenPast = new Set();
+  for (const row of pastRows.slice(0, PROVIDER_ROW_LIMIT)) {
+    const key = `${row.seasonId || ''}|${row.queue}|${row.tier}|${row.division}|${row.lp ?? ''}`;
+    if (seenPast.has(key)) continue;
+    seenPast.add(key);
+    pastSeasons.push(row);
+    if (pastSeasons.length >= PROVIDER_SEASON_LIMIT) break;
+  }
+  return {
+    available: true,
+    providerPuuid: providerPuuidValue,
+    providerPuuidCorroborated,
+    riotId: `${gameName}#${tagLine}`,
+    platformId,
+    queues: dedupeCurrentQueues(queues),
+    pastSeasons,
+    source: 'opgg',
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function beforeDeadline(promise, deadlineAt) {
@@ -281,60 +1037,91 @@ function beforeDeadline(promise, deadlineAt) {
   });
 }
 
-/** Discover a League platform only through an exact Riot ID + exact expected PUUID. */
-async function discoverOpggStats(riotId, expectedPuuid, preferredPlatformId = '', options = {}) {
+function discoveryFailure(kind, errors) {
+  const messages = errors.map((message) => String(message || ''));
+  const noExact = kind === 'League'
+    ? /did not return an exact match for the requested Riot ID/i
+    : /profile identity did not match the requested Riot ID/i;
+  if (messages.length && messages.every((message) => noExact.test(message))) {
+    return new Error(`No ${kind} platform matched both the requested Riot ID and PUUID.`);
+  }
+  if (messages.some((message) => /PUUID/i.test(message))) {
+    return new Error(`${kind} platform probes found the exact Riot ID, but its PUUID was missing or did not match.`);
+  }
+  if (messages.some((message) => /HTTP 429|rate.?limit/i.test(message))) {
+    return new Error(`${kind} platform discovery was blocked by OP.GG rate limiting.`);
+  }
+  if (messages.some((message) => /timed out/i.test(message))) {
+    return new Error(`${kind} platform discovery timed out while probing OP.GG.`);
+  }
+  if (messages.some((message) => /HTTP \d+|invalid JSON|too large|schema|untrusted host|summary identity|summoner identifier/i.test(message))) {
+    return new Error(`${kind} platform discovery could not verify OP.GG responses because of an HTTP or schema failure.`);
+  }
+  return new Error(`${kind} platform discovery failed before identity verification completed.`);
+}
+
+async function discoverOpgg(riotId, expectedPuuid, preferredPlatformId, options, config) {
   splitRiotId(riotId);
-  const wantedPuuid = String(expectedPuuid || '').trim();
-  if (!wantedPuuid) throw new Error('An expected PUUID is required for League platform discovery.');
+  const wantedPuuid = providerText(expectedPuuid);
+  if (!wantedPuuid) throw new Error(`An expected PUUID is required for ${config.kind} platform discovery.`);
   const preferred = canonicalLeaguePlatform(preferredPlatformId);
   const platforms = preferred
     ? [preferred, ...LEAGUE_PLATFORMS.filter((platformId) => platformId !== preferred)]
     : [...LEAGUE_PLATFORMS];
   const concurrency = Math.max(1, Math.min(3, Number(options.concurrency) || 3));
-  const deadlineAt = Date.now() + Math.max(100, Math.min(15000, Number(options.timeoutMs) || 15000));
+  const deadlineAt = Date.now() + Math.max(100, Math.min(30000, Number(options.timeoutMs) || 30000));
+  const errors = [];
 
+  // A PUUID-corroborated platform is authoritative and returns immediately.
+  // Otherwise we collect every platform that returned an exact, globally-unique
+  // Riot ID match; if exactly one platform matched, we accept it (weakened
+  // verification). Multiple platforms matching the exact Riot ID is ambiguous
+  // and still fails closed to avoid attaching the wrong region's data.
+  const exactRiotIdCandidates = [];
   for (let index = 0; index < platforms.length; index += concurrency) {
-    if (Date.now() >= deadlineAt) throw new Error('League platform discovery timed out.');
+    if (Date.now() >= deadlineAt) break;
     const batch = platforms.slice(index, index + concurrency);
     const results = await Promise.allSettled(batch.map((platformId) => beforeDeadline(
-      fetchOpggStats(riotId, platformId, wantedPuuid),
+      config.fetcher(riotId, platformId, wantedPuuid),
       deadlineAt,
     )));
     for (let offset = 0; offset < results.length; offset += 1) {
       if (results[offset].status === 'fulfilled') {
-        return { ...results[offset].value, platformId: batch[offset], platformSource: 'opgg-discovery' };
+        const value = results[offset].value;
+        if (!value) { errors.push(`${config.kind} platform probe returned no data.`); continue; }
+        if (value.providerPuuid && value.providerPuuid.toLowerCase() === wantedPuuid.toLowerCase()) {
+          return { ...value, platformId: batch[offset], platformSource: config.platformSource };
+        }
+        exactRiotIdCandidates.push({ ...value, platformId: batch[offset], platformSource: config.platformSource });
+        continue;
       }
+      const reason = results[offset].reason;
+      errors.push(reason && reason.message ? reason.message : `${config.kind} platform probe failed.`);
     }
   }
-  throw new Error('No League platform matched both the requested Riot ID and PUUID.');
+  if (exactRiotIdCandidates.length === 1) return exactRiotIdCandidates[0];
+  if (exactRiotIdCandidates.length > 1) {
+    throw new Error(`${config.kind} found the exact Riot ID on multiple platforms; its region could not be uniquely determined.`);
+  }
+  throw discoveryFailure(config.kind, errors);
+}
+
+/** Discover a League platform only through an exact Riot ID + exact expected PUUID. */
+async function discoverOpggStats(riotId, expectedPuuid, preferredPlatformId = '', options = {}) {
+  return discoverOpgg(riotId, expectedPuuid, preferredPlatformId, options, {
+    kind: 'League',
+    fetcher: (identity, platformId, puuid) => fetchOpggStats(identity, platformId, puuid, { requireProviderPuuid: true }),
+    platformSource: 'opgg-discovery',
+  });
 }
 
 /** Discover a TFT platform independently through an exact Riot ID + exact expected PUUID. */
 async function discoverOpggTftStats(riotId, expectedPuuid, preferredPlatformId = '', options = {}) {
-  splitRiotId(riotId);
-  const wantedPuuid = String(expectedPuuid || '').trim();
-  if (!wantedPuuid) throw new Error('An expected PUUID is required for TFT platform discovery.');
-  const preferred = canonicalLeaguePlatform(preferredPlatformId);
-  const platforms = preferred
-    ? [preferred, ...LEAGUE_PLATFORMS.filter((platformId) => platformId !== preferred)]
-    : [...LEAGUE_PLATFORMS];
-  const concurrency = Math.max(1, Math.min(3, Number(options.concurrency) || 3));
-  const deadlineAt = Date.now() + Math.max(100, Math.min(15000, Number(options.timeoutMs) || 15000));
-
-  for (let index = 0; index < platforms.length; index += concurrency) {
-    if (Date.now() >= deadlineAt) throw new Error('TFT platform discovery timed out.');
-    const batch = platforms.slice(index, index + concurrency);
-    const results = await Promise.allSettled(batch.map((platformId) => beforeDeadline(
-      fetchOpggTftStats(riotId, platformId, wantedPuuid),
-      deadlineAt,
-    )));
-    for (let offset = 0; offset < results.length; offset += 1) {
-      if (results[offset].status === 'fulfilled') {
-        return { ...results[offset].value, platformId: batch[offset], platformSource: 'opgg-tft-discovery' };
-      }
-    }
-  }
-  throw new Error('No TFT platform matched both the requested Riot ID and PUUID.');
+  return discoverOpgg(riotId, expectedPuuid, preferredPlatformId, options, {
+    kind: 'TFT',
+    fetcher: (identity, platformId, puuid) => fetchOpggTftStats(identity, platformId, puuid, { requireProviderPuuid: true }),
+    platformSource: 'opgg-tft-discovery',
+  });
 }
 
 /**
@@ -410,6 +1197,92 @@ function lcu(lock, pathname) {
     req.setTimeout(8000, () => req.destroy(new Error('League client request timed out.')));
     req.end();
   });
+}
+
+function liveClient(pathname) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: '127.0.0.1', port: 2999, path: pathname, method: 'GET', headers: { Accept: 'application/json' }, agent },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`Live client HTTP ${res.statusCode}`));
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('Live client returned unreadable data.')); }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(4000, () => req.destroy(new Error('Live client request timed out.')));
+    req.end();
+  });
+}
+
+const LEAGUE_PHASES = {
+  Lobby: 'In lobby', Matchmaking: 'In queue', ReadyCheck: 'Ready check', ChampSelect: 'Champion select',
+  GameStart: 'Starting match', InProgress: 'In match', WaitingForStats: 'Match ending',
+  PreEndOfGame: 'Match ending', EndOfGame: 'Post game', None: 'In client',
+};
+const LEAGUE_QUEUES = {
+  RANKED_SOLO_5X5: 'Ranked Solo/Duo', RANKED_FLEX_SR: 'Ranked Flex', NORMAL: 'Normal',
+  ARAM_UNRANKED_5X5: 'ARAM', CHERRY: 'Arena', RANKED_TFT: 'Ranked TFT',
+  RANKED_TFT_DOUBLE_UP: 'TFT Double Up', NORMAL_TFT: 'TFT Normal', TURBO: 'Swiftplay',
+};
+const LEAGUE_MAPS = {
+  "summoner's rift": "Summoner's Rift", 'howling abyss': 'Howling Abyss', 'convergence': 'Convergence',
+  'rings of wrath': 'Arena', 'teamfight tactics': 'Convergence',
+};
+
+function projectLeagueLiveSession(gameflow, gameStats = null, playerScore = null) {
+  if (!gameflow || typeof gameflow !== 'object') return null;
+  const phaseCode = String(gameflow.phase || '');
+  if (!Object.prototype.hasOwnProperty.call(LEAGUE_PHASES, phaseCode)) return null;
+  const data = gameflow.gameData && typeof gameflow.gameData === 'object' ? gameflow.gameData : {};
+  const queue = data.queue && typeof data.queue === 'object' ? data.queue : {};
+  const map = data.map && typeof data.map === 'object' ? data.map : {};
+  const queueType = String(queue.type || data.queueType || '').toUpperCase();
+  const gameMode = String(data.gameMode || gameStats && gameStats.gameMode || '').toUpperCase();
+  const rawMap = String(map.name || gameStats && gameStats.mapName || '').trim().toLowerCase();
+  const tft = /TFT/.test(`${queueType} ${gameMode}`) || rawMap === 'convergence' || rawMap === 'teamfight tactics';
+  const seconds = Number(gameStats && gameStats.gameTime);
+  const startedAt = phaseCode === 'InProgress' && Number.isFinite(seconds) && seconds >= 0 && seconds <= 86400
+    ? Date.now() - Math.floor(seconds * 1000) : null;
+  const kills = Number(playerScore && playerScore.kills);
+  const deaths = Number(playerScore && playerScore.deaths);
+  const assists = Number(playerScore && playerScore.assists);
+  const score = !tft && [kills, deaths, assists].every((value) => Number.isInteger(value) && value >= 0 && value <= 999)
+    ? `K/D/A ${kills}/${deaths}/${assists}` : '';
+  return {
+    product: tft ? 'tft' : 'league', game: tft ? 'Teamfight Tactics' : 'League of Legends',
+    mode: LEAGUE_QUEUES[queueType] || (gameMode === 'CLASSIC' ? 'Classic' : gameMode === 'ARAM' ? 'ARAM' : ''),
+    map: LEAGUE_MAPS[rawMap] || '', phase: LEAGUE_PHASES[phaseCode], phaseCode,
+    score, matchStartedAt: startedAt,
+  };
+}
+
+async function fetchLiveSession(configuredPath, expectedPuuid) {
+  const wanted = String(expectedPuuid || '').trim().toLowerCase();
+  if (!wanted) throw new Error('An expected PUUID is required for League live activity.');
+  const lock = await resolveLcu(configuredPath);
+  const before = await lcu(lock, '/lol-summoner/v1/current-summoner');
+  if (String(before && before.puuid || '').trim().toLowerCase() !== wanted) throw new Error('League Client is signed into a different Riot identity.');
+  const gameflow = await lcu(lock, '/lol-gameflow/v1/session');
+  let gameStats = null;
+  let playerScore = null;
+  if (String(gameflow && gameflow.phase || '') === 'InProgress') {
+    gameStats = await liveClient('/liveclientdata/gamestats').catch(() => null);
+    const projected = projectLeagueLiveSession(gameflow, gameStats);
+    if (projected && projected.product === 'league') {
+      const active = await liveClient('/liveclientdata/activeplayer').catch(() => null);
+      const summonerName = String(active && active.summonerName || '');
+      if (summonerName && summonerName.length <= 128 && !/[\u0000-\u001f\u007f]/.test(summonerName)) {
+        playerScore = await liveClient(`/liveclientdata/playerscores?summonerName=${encodeURIComponent(summonerName)}`).catch(() => null);
+      }
+    }
+  }
+  const after = await lcu(lock, '/lol-summoner/v1/current-summoner');
+  if (String(after && after.puuid || '').trim().toLowerCase() !== wanted) throw new Error('League identity changed while reading live activity.');
+  return projectLeagueLiveSession(gameflow, gameStats, playerScore);
 }
 
 /** LCU asset path -> Community Dragon URL. */
@@ -797,7 +1670,10 @@ async function buildTft(configuredPath) {
 
 /** Normalize one ranked LCU queue without fabricating zero/NA fields. */
 function normalizeRankedQueue(row) {
-  const tier = String(row.tier || row.tierName || 'UNRANKED').trim().toUpperCase() || 'UNRANKED';
+  if (!row || typeof row !== 'object') return null;
+  const rawTier = row.tier ?? row.tierName;
+  if (rawTier === undefined || rawTier === null || !String(rawTier).trim()) return null;
+  const tier = String(rawTier).trim().toUpperCase();
   const unranked = tier === 'UNRANKED' || tier === 'NONE' || tier === 'NA' || tier === 'N/A';
   const rawDivision = String(row.division || row.rank || '').trim().toUpperCase();
   const division = unranked || ['NA', 'N/A', 'NONE', '0'].includes(rawDivision) ? '' : rawDivision;
@@ -831,7 +1707,7 @@ async function buildStats(configuredPath) {
     ? ranked
     : (ranked && (ranked.queues || ranked.queueMap || ranked.queueStats || ranked.rankedQueueStats)) || [];
   const rows = Array.isArray(source) ? source : Object.entries(source || {}).map(([queueType, value]) => ({ queueType, ...value }));
-  const queues = rows.map(normalizeRankedQueue).filter((row) => wanted.has(row.queue));
+  const queues = dedupeCurrentQueues(rows.map(normalizeRankedQueue).filter(Boolean).filter((row) => wanted.has(row.queue)));
   const riotId = summoner.gameName && summoner.tagLine
     ? `${summoner.gameName}#${summoner.tagLine}`
     : (summoner.displayName || null);
@@ -849,7 +1725,8 @@ async function buildStats(configuredPath) {
 }
 
 module.exports = {
-  buildLeague, buildTft, buildStats, fetchOpggStats, fetchOpggTftStats, discoverOpggStats, discoverOpggTftStats,
+  buildLeague, buildTft, buildStats, fetchLiveSession, projectLeagueLiveSession,
+  fetchOpggStats, fetchOpggTftStats, discoverOpggStats, discoverOpggTftStats,
   opggProfileUrl, uggProfileUrl, deeplolProfileUrl, dpmProfileUrl, profileLinks,
   opggRegion, uggRegion, deeplolRegion,
   LEAGUE_PLATFORMS, normalizeLeaguePlatform, canonicalLeaguePlatform, selectLeaguePlatform,
