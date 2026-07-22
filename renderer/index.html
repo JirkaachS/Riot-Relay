@@ -439,9 +439,11 @@
               <p class="key-storage-status" id="hello-status"></p>
             </section>
             <div class="field security-password">
-              <label for="set-new-master">Change master password</label>
+              <label for="set-current-master">Change master password</label>
+              <input id="set-current-master" type="password" placeholder="Current master password" autocomplete="current-password" />
+              <input id="set-new-master" type="password" placeholder="New master password" autocomplete="new-password" />
               <div class="field__row">
-                <input id="set-new-master" type="password" placeholder="New master password" />
+                <input id="set-new-master-confirm" type="password" placeholder="Repeat new master password" autocomplete="new-password" />
                 <button class="btn btn--ghost" id="btn-change-master">Update</button>
               </div>
             </div>

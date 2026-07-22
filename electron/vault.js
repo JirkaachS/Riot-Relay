@@ -61,6 +61,13 @@ class Vault {
     return this.key !== null;
   }
 
+  /** Verify a candidate password against the currently unlocked vault's key, without changing anything. */
+  verifyPassword(candidatePassword) {
+    if (!this.isUnlocked() || !this.salt) return false;
+    const candidateKey = this._deriveKey(String(candidatePassword || ''), this.salt);
+    return candidateKey.length === this.key.length && crypto.timingSafeEqual(candidateKey, this.key);
+  }
+
   _deriveKey(password, salt) {
     return crypto.scryptSync(password, salt, SCRYPT_PARAMS.keylen, {
       N: SCRYPT_PARAMS.N,

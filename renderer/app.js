@@ -233,7 +233,16 @@ function chatAvailability(value) {
   return ['chat', 'online', 'away', 'mobile', 'dnd'].includes(availability) ? availability : 'offline';
 }
 function chatAvailabilityLabel(value) {
-  return { chat: 'Online', online: 'Online', away: 'Away', mobile: 'Mobile', dnd: 'Do not disturb', offline: 'Offline' }[chatAvailability(value)];
+  // Riot sets "dnd" automatically while a friend is queued, in champ select,
+  // or in an active match — it is not a status they chose, so showing it as
+  // "Do not disturb" reads as a deliberate do-not-bother signal. It is really
+  // just "online and busy playing", so it is shown as Online like any other
+  // active session.
+  return { chat: 'Online', online: 'Online', away: 'Away', mobile: 'Mobile', dnd: 'Online', offline: 'Offline' }[chatAvailability(value)];
+}
+function chatPresenceStage(friend) {
+  const stage = String(friend && friend.activity && friend.activity.stage || '').toLowerCase();
+  return ['lobby', 'queue', 'select', 'match'].includes(stage) ? stage : '';
 }
 function resizeChatComposer() {
   const input = $('#chat-message');
@@ -339,23 +348,38 @@ function chatActivityLine(friend) {
 function renderChatHeader(friend) {
   $('#chat-title').textContent = friend ? chatFriendLabel(friend) : 'Conversation';
   $('#chat-presence').textContent = friend ? (chatActivityLine(friend) || 'No game activity') : 'Current Riot session';
-  $('#chat-availability').textContent = friend ? chatAvailabilityLabel(friend.availability) : '';
-  $('#chat-availability').hidden = !friend;
+  const availabilityEl = $('#chat-availability');
+  availabilityEl.textContent = friend ? chatAvailabilityLabel(friend.availability) : '';
+  availabilityEl.hidden = !friend;
+  const stage = chatPresenceStage(friend);
+  availabilityEl.className = `chat-availability${stage ? ` chat-availability--stage-${stage}` : ''}`;
   $('#chat-head-avatar').innerHTML = friend ? chatAvatarContent(friend) : '?';
   const actions = $('#chat-profile-actions');
-  const labels = { tracker: 'Tracker', vtl: 'VTL', dpm: 'DPM', opgg: 'OP.GG', ugg: 'U.GG', deeplol: 'DeepLoL' };
-  const links = friend && friend.links && typeof friend.links === 'object' ? friend.links : {};
-  actions.innerHTML = Object.keys(labels).filter((provider) => typeof links[provider] === 'string')
-    .map((provider) => `<button type="button" data-chat-profile="${provider}" title="Open ${labels[provider]} profile">${labels[provider]}</button>`).join('');
-  actions.hidden = !actions.childElementCount;
+  // Always show every provider button, mirroring the account detail page:
+  // VALORANT profiles work from just the Riot ID, but League profiles need a
+  // verified platform that is only captured once this friend has been
+  // observed playing League. Rather than hiding those buttons (which made
+  // the League providers disappear for any friend not currently in a League
+  // game), they stay visible and explain why they can't open yet on click.
+  const labels = { vtl: 'VTL', tracker: 'Tracker', opgg: 'OP.GG', ugg: 'U.GG', deeplol: 'DeepLoL', dpm: 'DPM' };
+  actions.innerHTML = friend
+    ? Object.keys(labels).map((provider) => `<button type="button" data-chat-profile="${provider}" title="Open ${labels[provider]} profile">${labels[provider]}</button>`).join('')
+    : '';
+  actions.hidden = !friend;
   bindChatAvatars($('#chat-head-avatar'));
 }
 $('#chat-profile-actions').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-chat-profile]');
   if (!button || !state.chat.selectedId) return;
   const friend = state.chat.friends.find((item) => item.id === state.chat.selectedId);
-  const target = friend && friend.links && friend.links[button.dataset.chatProfile];
-  if (!target) return;
+  const provider = button.dataset.chatProfile;
+  const target = friend && friend.links && friend.links[provider];
+  if (!target) {
+    toast(provider === 'vtl' || provider === 'tracker'
+      ? 'This VALORANT profile link is unavailable for this friend right now.'
+      : 'This friend’s League platform has not been observed yet, so this League profile link is unavailable.', 'warn');
+    return;
+  }
   button.disabled = true;
   try { unwrap(await api.openExternal(target)); }
   catch (error) { toast(error.message, 'warn'); }
@@ -384,12 +408,13 @@ function renderChatFriends() {
   $('#chat-friends').innerHTML = visible.map((friend) => {
     const active = friend.id === state.chat.selectedId ? ' is-active' : '';
     const availability = chatAvailability(friend.availability);
+    const stage = chatPresenceStage(friend);
     const unread = state.chat.unreadByConversation.get(friend.id) || 0;
     const hasDraft = !!state.chat.drafts.get(friend.id);
     const label = chatFriendLabel(friend);
     const accessible = `Open chat with ${label}${unread ? `, ${unread} unread message${unread === 1 ? '' : 's'}` : ''}${hasDraft ? ', draft saved' : ''}`;
     return `<button class="chat-friend${active}" type="button" data-chat-friend="${escapeHtml(friend.id)}" aria-label="${escapeHtml(accessible)}" title="${escapeHtml(accessible)}">
-      <span class="chat-friend__avatar chat-avatar">${chatAvatarContent(friend)}<i class="chat-presence chat-presence--${escapeHtml(availability)}"></i></span>
+      <span class="chat-friend__avatar chat-avatar">${chatAvatarContent(friend)}<i class="chat-presence chat-presence--${escapeHtml(availability)}${stage ? ` chat-presence--stage-${escapeHtml(stage)}` : ''}"></i></span>
       <span class="chat-friend__meta"><strong>${escapeHtml(label)}</strong><small><span>${escapeHtml(chatActivityLine(friend) || 'No game activity')}</span><em>${escapeHtml(chatAvailabilityLabel(availability))}</em></small></span>
       ${hasDraft ? '<span class="chat-draft" aria-hidden="true">Draft</span>' : ''}
       ${unread ? `<span class="chat-unread chat-unread--friend" aria-hidden="true">${escapeHtml(boundedBadge(unread))}</span>` : ''}
@@ -2842,10 +2867,17 @@ $('#btn-pick-client').addEventListener('click', async () => {
   if (res.picked) { $('#set-client-path').value = res.clientPath; $('#client-detected').textContent = `Detected: ${res.clientPath}`; toast('Client path set.', 'good'); }
 });
 $('#btn-change-master').addEventListener('click', async () => {
+  const cp = $('#set-current-master').value;
   const np = $('#set-new-master').value;
-  if (!np) { toast('Enter a new master password.', 'warn'); return; }
-  try { unwrap(await api.vault.changeMaster(np)); $('#set-new-master').value = ''; toast('Master password updated.', 'good'); }
-  catch (e) { toast(e.message, 'bad'); }
+  const np2 = $('#set-new-master-confirm').value;
+  if (!cp) { toast('Enter your current master password.', 'warn'); return; }
+  if (!np || np.length < 4) { toast('New master password must be at least 4 characters.', 'warn'); return; }
+  if (np !== np2) { toast('New password and confirmation do not match.', 'warn'); return; }
+  try {
+    unwrap(await api.vault.changeMaster(cp, np, np2));
+    $('#set-current-master').value = ''; $('#set-new-master').value = ''; $('#set-new-master-confirm').value = '';
+    toast('Master password updated.', 'good');
+  } catch (e) { toast(e.message, 'bad'); }
 });
 $('#btn-refresh-catalog').addEventListener('click', async (event) => {
   const button = event.currentTarget;

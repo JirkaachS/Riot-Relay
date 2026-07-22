@@ -28,7 +28,7 @@ contextBridge.exposeInMainWorld('api', {
     helloOptions: (purpose) => invoke('vault:hello-options', purpose),
     lock: () => invoke('vault:lock'),
     setKeyStorageMode: (mode, registration = null) => invoke('vault:set-key-storage', { mode: String(mode || 'disabled'), registration }),
-    changeMaster: (newPassword) => invoke('vault:change-master', { newPassword }),
+    changeMaster: (currentPassword, newPassword, confirmPassword) => invoke('vault:change-master', { currentPassword, newPassword, confirmPassword }),
   },
 
   // Accounts
