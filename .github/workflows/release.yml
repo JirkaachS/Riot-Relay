@@ -38,10 +38,15 @@ jobs:
       - name: Build custom branded installer
         # dist:nsis above already produced dist/win-unpacked as an
         # intermediate step, so it is reused here as the payload source
-        # instead of rebuilding it.
+        # instead of rebuilding it. `npx --prefix` only changes npm's
+        # dependency-resolution root, not the working directory, so
+        # electron-builder must actually be run with cwd set to installer/
+        # or it packages the wrong project (the repo root) into the wrong
+        # dist/ directory.
+        working-directory: installer
         run: |
-          node installer/build-payload.js
-          npx --prefix installer electron-builder --config installer/electron-builder.yml --publish never
+          node build-payload.js
+          npx electron-builder --config electron-builder.yml --publish never
       - name: Publish complete GitHub release
         shell: pwsh
         run: |
