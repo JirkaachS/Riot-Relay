@@ -111,6 +111,8 @@ let configProfiles = null;
 const chatHandleSecret = crypto.randomBytes(32);
 const chatHandles = new Map();
 const chatLabels = new Map();
+const chatAvatars = new Map(); // identity -> last-known-good avatarUrl (in-memory only, cleared on account switch)
+const chatPlatforms = new Map(); // identity -> last-known League platformId (in-memory only, cleared on account switch)
 let chatSessionPuuid = null;
 let accountSwitchInProgress = false;
 let activeChatOperations = 0;
@@ -686,6 +688,8 @@ function chatHandle(rawId) {
 function invalidateChatSession() {
   chatHandles.clear();
   chatLabels.clear();
+  chatAvatars.clear();
+  chatPlatforms.clear();
   chatSessionPuuid = null;
 }
 
@@ -912,6 +916,16 @@ function safePresenceDetails(presence) {
     const platformId = league.canonicalLeaguePlatform(presenceValue(presence, details, [
       'platformId', 'platformID', 'PlatformId', 'PlatformID', 'platform_id', 'platform',
     ]));
+    const clashState = String(details.clashTournamentState || details.clash_tournament_state || '').toUpperCase();
+    const clash = clashState === 'SCOUTING' ? 'Clash · Scouting' : clashState === 'LOCKED_IN' ? 'Clash · Locked in' : '';
+    let partySize = null;
+    const rawParty = details.pty || details.partyData;
+    if (typeof rawParty === 'string' && rawParty.length <= 8192) {
+      try {
+        const partyInfo = JSON.parse(rawParty);
+        if (Array.isArray(partyInfo && partyInfo.summoners)) partySize = boundedPresenceInteger(partyInfo.summoners.length, 5);
+      } catch { partySize = null; }
+    }
     return {
       availability,
       game: 'League of Legends',
@@ -919,19 +933,25 @@ function safePresenceDetails(presence) {
       activity: {
         product: 'league',
         game: 'League',
-        phase,
+        phase: clash || phase,
         champion: showChampion && championId != null ? LEAGUE_CHAMPIONS[championId] || '' : '',
         mode: showMode ? leaguePresenceMode(details) : '',
+        party: partySize != null && partySize > 1 ? `In party (${partySize}/5)` : '',
       },
       avatarUrl: iconId ? `https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/profile-icons/${iconId}.jpg` : '',
     };
   }
   const state = String(details.sessionLoopState || details.session_loop_state || '').toUpperCase();
   const flow = String(details.provisioningFlow || details.partyOwnerProvisioningFlow || '').toLowerCase();
-  const partyState = String(details.partyState || '').toLowerCase();
+  const partyState = String(details.partyState || '').toUpperCase();
+  const inQueue = partyState === 'MATCHMAKING' || partyState === 'STARTING_MATCHMAKING' || /matchmaking/.test(flow);
+  const matchFound = partyState === 'MATCHMADE_GAME_STARTING';
   const phase = state === 'INGAME' ? 'In game'
     : state === 'PREGAME' ? 'Agent select'
-      : /matchmaking/.test(`${flow} ${partyState}`) ? 'In queue' : state === 'MENUS' ? 'In menus' : '';
+      : matchFound ? 'Match found'
+        : inQueue ? 'In queue'
+          : partyState === 'CUSTOM_GAME_SETUP' ? 'Custom game setup'
+            : state === 'MENUS' ? 'In menus' : '';
   const queueKey = String(details.queueId || '').trim().toLowerCase();
   const mapPath = String(details.matchMap || details.partyOwnerMatchMap || '').replace(/\\/g, '/');
   const mapKey = mapPath.split('/').filter(Boolean).pop()?.toLowerCase() || '';
@@ -939,6 +959,17 @@ function safePresenceDetails(presence) {
     'playerCardId', 'playerCardID', 'PlayerCardId', 'PlayerCardID', 'player_card_id', 'playercardid',
   ]) || '').trim();
   const cardId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(rawCard) ? rawCard.toLowerCase() : '';
+  const partySize = boundedPresenceInteger(presenceValue(presence, details, ['partySize', 'party_size']), 99);
+  const maxPartySize = boundedPresenceInteger(presenceValue(presence, details, ['maxPartySize', 'max_party_size']), 99);
+  const isPartyOwner = String(presenceValue(presence, details, ['isPartyOwner', 'is_party_owner']) ?? '').toLowerCase() === 'true';
+  const scoreAlly = boundedPresenceInteger(presenceValue(presence, details, [
+    'partyOwnerMatchScoreAllyTeam', 'party_owner_match_score_ally_team',
+  ]), 200);
+  const scoreEnemy = boundedPresenceInteger(presenceValue(presence, details, [
+    'partyOwnerMatchScoreEnemyTeam', 'party_owner_match_score_enemy_team',
+  ]), 200);
+  const customTeam = String(presenceValue(presence, details, ['customGameTeam', 'custom_game_team']) || '').trim();
+  const isIdle = String(presenceValue(presence, details, ['isIdle', 'is_idle']) ?? '').toLowerCase() === 'true';
   return {
     availability,
     game: 'VALORANT',
@@ -946,9 +977,13 @@ function safePresenceDetails(presence) {
     activity: {
       product: 'valorant',
       game: 'VALORANT',
-      phase,
-      mode: phase === 'In menus' ? '' : VALORANT_QUEUES[queueKey] || '',
+      phase: isIdle && phase ? `${phase} (away)` : phase,
+      mode: phase === 'In menus' ? '' : VALORANT_QUEUES[queueKey] || (queueKey ? '' : 'Custom'),
       map: state === 'PREGAME' || state === 'INGAME' ? VALORANT_MAPS[mapKey] || '' : '',
+      score: state === 'INGAME' && scoreAlly != null && scoreEnemy != null ? `${scoreAlly}-${scoreEnemy}` : '',
+      spectating: state === 'INGAME' && customTeam === 'TeamSpectate',
+      party: partySize != null && maxPartySize != null && (partySize > 1 || maxPartySize > 1)
+        ? `${isPartyOwner ? 'Leading' : 'In'} party (${partySize}/${maxPartySize})` : '',
     },
     avatarUrl: cardId ? `https://media.valorant-api.com/playercards/${cardId}/smallart.png` : '',
   };
@@ -997,7 +1032,18 @@ function normalizeChatFriend(friend, presenceIndex = new Map()) {
     if (presenceIndex.has(identity)) { presence = presenceIndex.get(identity); break; }
   }
   const rosterProduct = knownChatProduct(friend, null);
-  const platformId = presence && league.canonicalLeaguePlatform(presence.platformId);
+  // Presence only carries an avatar and League platformId while the friend
+  // broadcasts rich game state (e.g. actively in League or VALORANT). Retain
+  // the last-known-good values per identity for this session so avatars and
+  // League profile links don't disappear the moment a friend goes offline
+  // or returns to the main menu.
+  const cacheKey = identities.size ? [...identities][0] : raw.toLowerCase();
+  let avatarUrl = presence ? presence.avatarUrl : '';
+  if (avatarUrl) chatAvatars.set(cacheKey, avatarUrl);
+  else avatarUrl = chatAvatars.get(cacheKey) || '';
+  let platformId = presence && league.canonicalLeaguePlatform(presence.platformId);
+  if (platformId) chatPlatforms.set(cacheKey, platformId);
+  else platformId = chatPlatforms.get(cacheKey) || null;
   return {
     id,
     displayName: gameName,
@@ -1006,7 +1052,7 @@ function normalizeChatFriend(friend, presenceIndex = new Map()) {
     game: presence ? presence.game : (rosterProduct === 'league' ? 'League of Legends' : rosterProduct === 'valorant' ? 'VALORANT' : ''),
     activity: presence && presence.activity ? presence.activity : null,
     group: String(friend.group || friend.groupName || '').slice(0, 60),
-    avatarUrl: presence ? presence.avatarUrl : '',
+    avatarUrl,
     links: friendProfileLinks(label, platformId),
   };
 }

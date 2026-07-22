@@ -35,7 +35,7 @@ const state = {
   activity: [],
   rankIcons: {},
   settings: {},
-  updates: { status: 'idle', currentVersion: '1.3.9', availableVersion: null, progress: 0 },
+  updates: { status: 'idle', currentVersion: '1.4.0', availableVersion: null, progress: 0 },
   startup: { supported: false, enabled: false, reason: 'Checking Windows startup registration…' },
   configProfiles: [],
   configProfilesError: null,
@@ -47,7 +47,7 @@ const state = {
   inv: { section: 'Skin', exportSel: new Set(['Skin']), search: '', tier: '', accSearch: '', game: 'valorant', entranceSeen: new Set() },
   chat: {
     identity: null, friends: [], selectedId: null, messages: [], search: '', filter: 'all', sort: 'unread', drafts: new Map(), timer: null, loading: false, generation: 0,
-    inboxIdentityHash: null, inboxBaseline: false, seenIncomingIds: new Set(), unreadByConversation: new Map(),
+    inboxIdentityHash: null, inboxBaseline: false, seenIncomingIds: new Set(), unreadByConversation: new Map(), inboxByIdentity: new Map(),
   },
 };
 
@@ -188,10 +188,24 @@ function stopChatPolling() {
   state.chat.timer = null;
 }
 function resetChatInbox(identityHash = null) {
+  // Persist the outgoing identity's read/unread state (bounded to a handful
+  // of recent identities) so switching back to an account already seen this
+  // process lifetime does not re-flag previously read messages as unread.
+  if (state.chat.inboxIdentityHash) {
+    state.chat.inboxByIdentity.set(state.chat.inboxIdentityHash, {
+      inboxBaseline: state.chat.inboxBaseline,
+      seenIncomingIds: new Set(state.chat.seenIncomingIds),
+      unreadByConversation: new Map(state.chat.unreadByConversation),
+    });
+    while (state.chat.inboxByIdentity.size > 8) {
+      state.chat.inboxByIdentity.delete(state.chat.inboxByIdentity.keys().next().value);
+    }
+  }
+  const saved = identityHash ? state.chat.inboxByIdentity.get(identityHash) : null;
   state.chat.inboxIdentityHash = identityHash;
-  state.chat.inboxBaseline = false;
-  state.chat.seenIncomingIds = new Set();
-  state.chat.unreadByConversation = new Map();
+  state.chat.inboxBaseline = saved ? saved.inboxBaseline : false;
+  state.chat.seenIncomingIds = saved ? new Set(saved.seenIncomingIds) : new Set();
+  state.chat.unreadByConversation = saved ? new Map(saved.unreadByConversation) : new Map();
   state.chat.drafts = new Map();
   updateChatUnreadBadges();
 }
@@ -313,10 +327,13 @@ function chatActivityLine(friend) {
   const activity = friend && friend.activity;
   if (!activity || typeof activity !== 'object') return String(friend && friend.game || '');
   const parts = [activity.game];
+  if (activity.product === 'valorant' && activity.spectating) parts.push('Spectating');
   if (activity.phase) parts.push(activity.phase);
   if (activity.product === 'league' && activity.champion) parts.push(activity.champion);
   if (activity.product === 'valorant' && activity.map) parts.push(activity.map);
   if (activity.mode) parts.push(activity.mode);
+  if (activity.product === 'valorant' && activity.score) parts.push(activity.score);
+  if (activity.party) parts.push(activity.party);
   return parts.filter((value, index, values) => value && values.indexOf(value) === index).join(' · ');
 }
 function renderChatHeader(friend) {
@@ -2876,7 +2893,7 @@ function renderUpdateState(updateState) {
   const previousStatus = lastUpdateStatus;
   state.updates = { ...state.updates, ...updateState };
   lastUpdateStatus = state.updates.status;
-  const version = String(state.updates.currentVersion || '1.3.9');
+  const version = String(state.updates.currentVersion || '1.4.0');
   const available = String(state.updates.availableVersion || '');
   const progress = Math.max(0, Math.min(100, Number(state.updates.progress) || 0));
   $('#app-version-title').textContent = version;
@@ -2915,7 +2932,46 @@ function renderUpdateState(updateState) {
     if (state.updates.status === 'downloaded') toast(`Riot Relay ${available} is ready to install.`, 'good');
     else if (state.updates.status === 'error') toast(state.updates.error || 'Update check failed.', 'warn');
   }
+  renderUpdateBanner();
 }
+let updateBannerDismissedFor = '';
+function renderUpdateBanner() {
+  const banner = $('#update-banner');
+  const status = state.updates.status;
+  const available = String(state.updates.availableVersion || '');
+  const bannerKey = `${status}:${available}`;
+  if (!['available', 'downloading', 'downloaded'].includes(status) || updateBannerDismissedFor === bannerKey) {
+    banner.hidden = true;
+    return;
+  }
+  banner.hidden = false;
+  const progress = Math.max(0, Math.min(100, Number(state.updates.progress) || 0));
+  const titles = {
+    available: `Riot Relay ${available || 'update'} is available`,
+    downloading: `Downloading Riot Relay ${available || 'update'}…`,
+    downloaded: `Riot Relay ${available || 'update'} is ready to install`,
+  };
+  const details = {
+    available: 'The verified release package will download automatically.',
+    downloading: `${Math.round(progress)}% complete. You can keep using Riot Relay.`,
+    downloaded: 'Restart now, or it installs automatically the next time you quit.',
+  };
+  $('#update-banner-title').textContent = titles[status] || 'Update available';
+  $('#update-banner-detail').textContent = details[status] || '';
+  $('#update-banner-progress').hidden = status !== 'downloading';
+  $('#update-banner-progress-bar').style.width = `${progress}%`;
+  const action = $('#update-banner-action');
+  action.hidden = status !== 'downloaded';
+  action.textContent = 'Restart and install';
+}
+$('#update-banner-action').addEventListener('click', async () => {
+  try { renderUpdateState(unwrap(await api.updates.install())); }
+  catch (error) { toast(error.message, 'bad'); }
+});
+$('#update-banner-dismiss').addEventListener('click', () => {
+  updateBannerDismissedFor = `${state.updates.status}:${String(state.updates.availableVersion || '')}`;
+  $('#update-banner').hidden = true;
+});
 async function initUpdates() {
   api.updates.onState(renderUpdateState);
   try { renderUpdateState(unwrap(await api.updates.getState())); }
