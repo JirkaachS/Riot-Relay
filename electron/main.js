@@ -926,6 +926,11 @@ function safePresenceDetails(presence) {
         if (Array.isArray(partyInfo && partyInfo.summoners)) partySize = boundedPresenceInteger(partyInfo.summoners.length, 5);
       } catch { partySize = null; }
     }
+    const leagueStageKey = status === 'ingame' || status === 'spectating' ? 'match'
+      : status === 'champselect' || status === 'championselect' ? 'select'
+        : status === 'inqueue' ? 'queue'
+          : status === 'hostingcustomgame' ? 'lobby'
+            : status === 'outofgame' ? 'lobby' : '';
     return {
       availability,
       game: 'League of Legends',
@@ -933,6 +938,7 @@ function safePresenceDetails(presence) {
       activity: {
         product: 'league',
         game: 'League',
+        stage: leagueStageKey,
         phase: clash || phase,
         champion: showChampion && championId != null ? LEAGUE_CHAMPIONS[championId] || '' : '',
         mode: showMode ? leaguePresenceMode(details) : '',
@@ -946,12 +952,6 @@ function safePresenceDetails(presence) {
   const partyState = String(details.partyState || '').toUpperCase();
   const inQueue = partyState === 'MATCHMAKING' || partyState === 'STARTING_MATCHMAKING' || /matchmaking/.test(flow);
   const matchFound = partyState === 'MATCHMADE_GAME_STARTING';
-  const phase = state === 'INGAME' ? 'In game'
-    : state === 'PREGAME' ? 'Agent select'
-      : matchFound ? 'Match found'
-        : inQueue ? 'In queue'
-          : partyState === 'CUSTOM_GAME_SETUP' ? 'Custom game setup'
-            : state === 'MENUS' ? 'In menus' : '';
   const queueKey = String(details.queueId || '').trim().toLowerCase();
   const mapPath = String(details.matchMap || details.partyOwnerMatchMap || '').replace(/\\/g, '/');
   const mapKey = mapPath.split('/').filter(Boolean).pop()?.toLowerCase() || '';
@@ -970,6 +970,26 @@ function safePresenceDetails(presence) {
   ]), 200);
   const customTeam = String(presenceValue(presence, details, ['customGameTeam', 'custom_game_team']) || '').trim();
   const isIdle = String(presenceValue(presence, details, ['isIdle', 'is_idle']) ?? '').toLowerCase() === 'true';
+  const hasLiveScore = state === 'INGAME' && scoreAlly != null && scoreEnemy != null;
+  // A live round score means the match is actually underway, so that always
+  // takes priority over a stale queue/party-state flag (Riot's presence
+  // frequently leaves partyState as MATCHMAKING for a few beats after the
+  // match has already started, which previously showed "In queue" next to a
+  // live 2-2 score).
+  const phase = hasLiveScore ? 'In match'
+    : state === 'INGAME' ? 'In game'
+      : state === 'PREGAME' ? 'Agent select'
+        : matchFound ? 'Match found'
+          : inQueue ? 'In queue'
+            : partyState === 'CUSTOM_GAME_SETUP' ? 'Custom game setup'
+              : state === 'MENUS' ? 'In lobby' : '';
+  const stageKey = hasLiveScore ? 'match'
+    : state === 'INGAME' ? 'match'
+      : state === 'PREGAME' ? 'select'
+        : matchFound ? 'select'
+          : inQueue ? 'queue'
+            : partyState === 'CUSTOM_GAME_SETUP' ? 'lobby'
+              : state === 'MENUS' ? 'lobby' : '';
   return {
     availability,
     game: 'VALORANT',
@@ -977,10 +997,11 @@ function safePresenceDetails(presence) {
     activity: {
       product: 'valorant',
       game: 'VALORANT',
+      stage: stageKey,
       phase: isIdle && phase ? `${phase} (away)` : phase,
-      mode: phase === 'In menus' ? '' : VALORANT_QUEUES[queueKey] || (queueKey ? '' : 'Custom'),
+      mode: phase === 'In lobby' ? '' : VALORANT_QUEUES[queueKey] || (queueKey ? '' : 'Custom'),
       map: state === 'PREGAME' || state === 'INGAME' ? VALORANT_MAPS[mapKey] || '' : '',
-      score: state === 'INGAME' && scoreAlly != null && scoreEnemy != null ? `${scoreAlly}-${scoreEnemy}` : '',
+      score: hasLiveScore ? `${scoreAlly}-${scoreEnemy}` : '',
       spectating: state === 'INGAME' && customTeam === 'TeamSpectate',
       party: partySize != null && maxPartySize != null && (partySize > 1 || maxPartySize > 1)
         ? `${isPartyOwner ? 'Leading' : 'In'} party (${partySize}/${maxPartySize})` : '',
@@ -1053,6 +1074,7 @@ function normalizeChatFriend(friend, presenceIndex = new Map()) {
     activity: presence && presence.activity ? presence.activity : null,
     group: String(friend.group || friend.groupName || '').slice(0, 60),
     avatarUrl,
+    platformId: platformId || null,
     links: friendProfileLinks(label, platformId),
   };
 }
@@ -1121,9 +1143,14 @@ function storedLeaguePlatformForLive(live) {
   return { platformId, platformSource, platformVerifiedAt };
 }
 
-function preserveTrustedPastSeasons(section, game, live, providerSucceeded, failureReason) {
-  if (providerSucceeded || !failureReason || !section || !live || !live.puuid
-    || (Array.isArray(section.pastSeasons) && section.pastSeasons.length)) return section;
+function preserveTrustedPastSeasons(section, game, live, failureReason) {
+  // Restore the last verified history whenever this refresh came back with no
+  // history rows at all, not only when the provider call outright failed.
+  // OP.GG's regular per-account summary endpoint frequently omits historical
+  // season rows even on a successful call (they were reliably present only in
+  // the richer discovery-time response), which previously clobbered
+  // previously-captured history with an empty array on every normal refresh.
+  if (!section || !live || !live.puuid || (Array.isArray(section.pastSeasons) && section.pastSeasons.length)) return section;
   const platformId = league.canonicalLeaguePlatform(section.platformId);
   if (!platformId || !vault || !vault.isUnlocked()) return section;
   const account = vault.listAccounts().find((item) => {
@@ -1144,7 +1171,9 @@ function preserveTrustedPastSeasons(section, game, live, providerSucceeded, fail
     ...section,
     pastSeasons: trusted,
     historyStale: true,
-    historyStaleReason: safeError(failureReason, `${game === 'league' ? 'League' : 'TFT'} history provider failed; showing the last verified history.`),
+    historyStaleReason: failureReason
+      ? safeError(failureReason, `${game === 'league' ? 'League' : 'TFT'} history provider failed; showing the last verified history.`)
+      : `${game === 'league' ? 'League' : 'TFT'} history was not included in this refresh; showing the last verified history.`,
   };
 }
 
@@ -1433,8 +1462,8 @@ async function buildAllStats(live) {
     || (opggResult.error && safeError(opggResult.error, 'OP.GG League history is unavailable.'));
   const tftHistoryFailure = onlineTftIdentityError
     || (onlineTftResult.error && safeError(onlineTftResult.error, 'OP.GG TFT history is unavailable.'));
-  leagueStats = preserveTrustedPastSeasons(leagueStats, 'league', live, !!verifiedOpgg, leagueHistoryFailure);
-  tftStats = preserveTrustedPastSeasons(tftStats, 'tft', live, !!verifiedOnlineTft, tftHistoryFailure);
+  leagueStats = preserveTrustedPastSeasons(leagueStats, 'league', live, leagueHistoryFailure);
+  tftStats = preserveTrustedPastSeasons(tftStats, 'tft', live, tftHistoryFailure);
 
   return { valorant, league: leagueStats, tft: tftStats };
 }
@@ -1793,9 +1822,11 @@ handle('vault:set-key-storage', async (payload) => {
   };
 });
 
-handle('vault:change-master', async ({ newPassword }) => {
+handle('vault:change-master', async ({ currentPassword, newPassword, confirmPassword }) => {
   requireUnlocked();
+  if (!currentPassword || !vault.verifyPassword(currentPassword)) throw new Error('Current master password is incorrect.');
   if (!newPassword || newPassword.length < 4) throw new Error('Master password must be at least 4 characters.');
+  if (newPassword !== confirmPassword) throw new Error('New password and confirmation do not match.');
   vault.changeMasterPassword(newPassword);
   return {
     changed: true,

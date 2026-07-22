@@ -21,7 +21,10 @@ const ENDPOINTS = {
   titles: 'https://valorant-api.com/v1/playertitles',
   agents: 'https://valorant-api.com/v1/agents?isPlayableCharacter=true',
 };
-const SEASONS_ENDPOINT = 'https://valorant-api.com/v1/seasons/competitive';
+// /v1/seasons/competitive only carries season *windows* (start/end time,
+// competitive tier set) and has no displayName/parentUuid at all. The actual
+// human-readable act/episode names only exist on the plain /v1/seasons list.
+const SEASONS_ENDPOINT = 'https://valorant-api.com/v1/seasons';
 const SEASON_CACHE_TTL = 24 * 60 * 60 * 1000;
 let seasonNameCache = null; // Map<uuid, displayName>
 let seasonNameCacheAt = 0;
