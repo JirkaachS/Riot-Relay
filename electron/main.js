@@ -1276,38 +1276,49 @@ async function buildAllStats(live) {
       .some((error) => /PUUID|exact match|identity did not match/i.test(String(error && error.message || '')));
     if (!trustedPlatform || (!opggResult.value && !onlineTftResult.value && directIdentityFailure)) {
       const preferredPlatform = trustedPlatform && trustedPlatform.platformId || '';
-      let leagueDiscoveryError = null;
-      try {
-        const discovered = await league.discoverOpggStats(liveRiotId, live.puuid, preferredPlatform, { timeoutMs: 20000 });
+      // League and TFT platform discovery are independent region probes, so
+      // they run concurrently instead of falling back to TFT only after the
+      // League discovery has fully timed out.
+      const [leagueDiscovery, tftDiscovery] = await Promise.allSettled([
+        league.discoverOpggStats(liveRiotId, live.puuid, preferredPlatform, { timeoutMs: 20000 }),
+        league.discoverOpggTftStats(liveRiotId, live.puuid, preferredPlatform, { timeoutMs: 20000 }),
+      ]);
+      if (leagueDiscovery.status === 'fulfilled') {
+        const discovered = leagueDiscovery.value;
         trustedPlatform = {
           platformId: league.canonicalLeaguePlatform(discovered.platformId),
           platformSource: discovered.platformSource,
           platformVerifiedAt: new Date().toISOString(),
         };
         opggResult = { value: { ...discovered, ...trustedPlatform } };
-        onlineTftResult = await acceptOnPlatform(
-          league.fetchOpggTftStats(liveRiotId, trustedPlatform.platformId, live.puuid),
-          trustedPlatform,
-        );
-      } catch (error) {
-        leagueDiscoveryError = error;
-        try {
-          const discovered = await league.discoverOpggTftStats(liveRiotId, live.puuid, preferredPlatform, { timeoutMs: 20000 });
-          trustedPlatform = {
-            platformId: league.canonicalLeaguePlatform(discovered.platformId),
-            platformSource: discovered.platformSource,
-            platformVerifiedAt: new Date().toISOString(),
-          };
-          onlineTftResult = { value: { ...discovered, ...trustedPlatform } };
+      }
+      if (tftDiscovery.status === 'fulfilled') {
+        const discovered = tftDiscovery.value;
+        const tftPlatform = {
+          platformId: league.canonicalLeaguePlatform(discovered.platformId),
+          platformSource: discovered.platformSource,
+          platformVerifiedAt: new Date().toISOString(),
+        };
+        onlineTftResult = { value: { ...discovered, ...tftPlatform } };
+        if (!trustedPlatform) trustedPlatform = tftPlatform;
+      }
+      if (leagueDiscovery.status === 'rejected' && tftDiscovery.status === 'rejected') {
+        opggResult = { error: leagueDiscovery.reason };
+        onlineTftResult = { error: tftDiscovery.reason };
+      } else {
+        // One discovery succeeded and pinned the trusted platform; fetch the
+        // other stat type on that same platform if it was not already found.
+        if (!opggResult.value && trustedPlatform) {
           opggResult = await acceptOnPlatform(
             league.fetchOpggStats(liveRiotId, trustedPlatform.platformId, live.puuid),
             trustedPlatform,
           );
-        } catch (tftDiscoveryError) {
-          if (!trustedPlatform) {
-            opggResult = { error: leagueDiscoveryError };
-            onlineTftResult = { error: tftDiscoveryError };
-          }
+        }
+        if (!onlineTftResult.value && trustedPlatform) {
+          onlineTftResult = await acceptOnPlatform(
+            league.fetchOpggTftStats(liveRiotId, trustedPlatform.platformId, live.puuid),
+            trustedPlatform,
+          );
         }
       }
     }

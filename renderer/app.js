@@ -1219,24 +1219,6 @@ function bestRosterRank(account) {
 function rosterGameLabel(game) {
   return game === 'valorant' ? 'VALORANT' : game === 'league' ? 'League of Legends' : 'Teamfight Tactics';
 }
-function rosterArtworkTier(rank) {
-  const tier = normalizedRosterTier(rank && rank.tierName).toLowerCase();
-  const mapped = { ascendant: 'emerald', immortal: 'grandmaster', radiant: 'challenger' }[tier] || tier;
-  const title = mapped.charAt(0).toUpperCase() + mapped.slice(1);
-  return mapped === 'emerald' || LEAGUE_EMBLEM_TIERS.has(title) ? mapped : null;
-}
-function rosterRankFrame(rank) {
-  const tier = rosterArtworkTier(rank);
-  if (!tier) return '';
-  const title = tier.charAt(0).toUpperCase() + tier.slice(1);
-  const crestSource = tier === 'emerald' ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/Emblem_${title}.png`;
-  // The plain classic per-tier crest only. Layered wing-plate splash art and
-  // border-accent overlays were removed: at roster-row size they rendered as
-  // oversized, distorted artwork rather than a clean badge.
-  return `<span class="arow__rank-frame" aria-hidden="true">
-    <img class="arow__rank-crest" data-rank-asset src="${crestSource}" alt="" loading="lazy" decoding="async" />
-  </span>`;
-}
 function accountRow(a, signedIn = false) {
   const bestRank = bestRosterRank(a);
   const sub = bestRank ? bestRank.label
@@ -1254,7 +1236,6 @@ function accountRow(a, signedIn = false) {
   const accessible = `${a.label || a.username || 'Account'}${bestRank ? `, ${rosterGameLabel(bestRank.game)} ${bestRank.label}` : ''}. Drag to move between roster sections.`;
   return `
     <div class="arow${active}${favorite}${current}${border}" data-select="${a.id}" data-account-drag="${a.id}" draggable="true" role="group" tabindex="0" title="${escapeHtml(accessible)}" aria-label="${escapeHtml(accessible)}"${rankStyle}>
-      ${border ? rosterRankFrame(bestRank) : ''}
       ${portraitMarkup(a, 'arow__av')}
       <div class="arow__meta">
         <div class="arow__label"><span>${escapeHtml(a.label || 'Unnamed')}</span>${signedIn ? '<span class="arow__live" title="Currently signed in" aria-label="Currently signed in">SIGNED IN</span>' : ''}${a.hasSession ? `<span class="arow__bolt" title="Identity-verified saved session">${ic('zap', 11)}</span>` : ''}</div>
@@ -1903,8 +1884,8 @@ async function doSwitch(id, launchGame = null) {
       logActivity('Riot did not confirm authentication; saved credentials or a verification challenge need attention.', 'warn');
       toast('Riot did not authenticate this account. Verify the saved login username/password, or complete any Riot verification challenge.', 'bad');
     } else if (res.awaitingUserVerification) {
-      logActivity('Riot verification is still pending; the client was left open for 2FA.', 'warn');
-      toast('Complete 2FA or the verification challenge in Riot Client. Riot Relay left the session open and did not restart it.', 'warn');
+      logActivity('Riot has not confirmed sign-in for this account yet; the client was left open to check.', 'warn');
+      toast('Riot has not confirmed sign-in yet. Check the Riot Client window — this can mean the saved username/password is wrong, Riot is asking for extra verification (2FA/captcha), or it just needs more time. Riot Relay left it open and did not restart it.', 'warn');
     } else if (res.recoverable) {
       logActivity('Verification timed out; Riot was left open for recovery.', 'warn');
       toast('Riot is still starting or awaiting sign-in. It was left open and was not restarted.', 'warn');
