@@ -1,0 +1,35 @@
+appId: com.riotrelay.setup
+productName: Riot Relay Setup
+copyright: Copyright © 2026 Riot Relay contributors
+asar: true
+compression: normal
+directories:
+  output: dist
+  buildResources: build
+files:
+  - main.js
+  - preload.js
+  - setup-actions.js
+  - renderer/**/*
+  - "!**/*.map"
+extraResources:
+  - from: resources/payload.zip
+    to: payload.zip
+  - from: resources/manifest.json
+    to: manifest.json
+  - from: resources/LICENSE.txt
+    to: LICENSE.txt
+win:
+  icon: ../build/icon.ico
+  executableName: Riot Relay Setup
+  legalTrademarks: Riot Relay is an unofficial community application and is not endorsed by Riot Games.
+  target:
+    - target: portable
+      arch:
+        - x64
+portable:
+  # Named distinctly from the plain NSIS artifact (Riot-Relay-Setup-*.exe,
+  # still built for silent background auto-updates) since both are uploaded
+  # to the same GitHub release and asset names must be unique there.
+  artifactName: Riot-Relay-Installer-${version}-x64.${ext}
+  unpackDirName: riot-relay-setup-cache
