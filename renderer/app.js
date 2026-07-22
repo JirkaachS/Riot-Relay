@@ -1888,9 +1888,15 @@ async function doSwitch(id, launchGame = null) {
       updateStatusBar();
       renderAccounts(); renderDetail();
       const captureNote = res.sessionCapture && res.sessionCapture.captured ? ' Persistent session captured.' : '';
+      // Riot's Client now opens to the requested game's tab rather than
+      // auto-starting it; a launch request being accepted (without the game
+      // process itself starting) is the normal, expected outcome, not a
+      // failure, so it gets its own distinct note instead of silence.
       const gameNote = res.launchVerified === true && res.launchedGame
         ? ` ${gameLabel(res.launchedGame)} process confirmed running.`
-        : '';
+        : res.launcherAccepted === true && launchGame
+          ? ` Riot Client opened to ${gameLabel(launchGame)}; press PLAY there.`
+          : '';
       const migration = res.configMigration;
       const changed = Number(migration && migration.changed || 0);
       const unchanged = Number(migration && migration.unchanged || 0);

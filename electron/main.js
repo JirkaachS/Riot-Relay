@@ -2112,7 +2112,7 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
         launchVerified = productLaunch.launchVerified === true;
         send(launchVerified
           ? `${GAMES[requestedGame].label} is starting.`
-          : `Riot Client accepted the ${GAMES[requestedGame].label} launch request. If it does not open, press PLAY in the Riot Client.`);
+          : `Riot Client opened to ${GAMES[requestedGame].label}. Press PLAY there to start it.`);
         await waitForHealthyRiotSession(acc, { timeoutMs: 45000, requireDeceive: Boolean(activeConfigUrl) });
 
         if (hasConfigBinding && configMigration) {
