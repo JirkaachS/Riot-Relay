@@ -879,6 +879,20 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .update-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
 .update-actions .btn[hidden] { display: none; }
 
+/* Global update banner (auto-appears once an update is available/downloaded) */
+.update-banner { display: flex; align-items: center; gap: 10px; flex: none; padding: 7px 10px; background: linear-gradient(90deg, #1a1a30, #14141c); border-bottom: 1px solid var(--line); animation: fade .18s ease; }
+.update-banner[hidden] { display: none; }
+.update-banner__icon { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 5px; background: rgba(150, 150, 220, .16); color: #a6a6e8; }
+.update-banner__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.update-banner__text strong { font-size: 11.5px; color: var(--text); }
+.update-banner__text small { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-banner__progress { flex: none; width: 120px; height: 4px; overflow: hidden; border-radius: 2px; background: #24242b; }
+.update-banner__progress[hidden] { display: none; }
+.update-banner__progress i { display: block; width: 0; height: 100%; background: #a9a9e8; transition: width .2s ease; }
+.update-banner .btn { flex: none; padding: 5px 12px; font-size: 11px; }
+.update-banner__dismiss { flex: none; width: 24px; height: 24px; color: var(--muted); }
+.update-banner__dismiss:hover { color: var(--text); }
+
 /* ---------- Config profiles and chat ergonomics ---------- */
 .feature-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
 .feature-panel-head h3 { margin-bottom: 2px; }
