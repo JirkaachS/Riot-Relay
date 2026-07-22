@@ -20,6 +20,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const { spawn } = require('child_process');
 const packageMetadata = require('../package.json');
 
 const { Vault } = require('./vault');
@@ -2257,9 +2258,15 @@ handle('account:switch', async (payload) => runAccountSwitch(async () => {
       send('Account verified; persistent session capture continues in the background.');
       void session.captureWhenStable(userData, id, captureAccount, {
         sinceMs: result.submittedAt,
-        timeoutMs: 12000,
+        timeoutMs: 20000,
         verifyIdentity: async () => {
-          const active = await settleBefore(riot.resolveChatSession(), 5000);
+          // Use the entitlements-based session (subject/PUUID), the same
+          // signal verifyActiveAccount() uses, not the chat session. Riot's
+          // chat endpoint only becomes ready several seconds after login, so
+          // probing it here on a tight 5s budget almost always timed out and
+          // silently skipped capturing the session, even right after a
+          // successful, verified sign-in.
+          const active = await settleBefore(riot.resolveSession(), 10000);
           if (!exactPuuidMatch(active && active.puuid, captureAccount.puuid)) {
             throw new Error('The active Riot identity changed before session capture.');
           }
@@ -2748,6 +2755,52 @@ handleTrusted('updates:check', async () => updateService
 handleTrusted('updates:install', async () => updateService
   ? updateService.install()
   : Promise.reject(new Error('Update service is not ready.')));
+
+handleTrusted('app:get-uninstall-info', async () => {
+  const flavor = String(packageMetadata.installerFlavor || 'development');
+  const uninstallerPath = app.isPackaged ? path.join(path.dirname(process.execPath), `Uninstall ${APP_NAME}.exe`) : '';
+  return {
+    supported: app.isPackaged && process.platform === 'win32' && flavor === 'nsis' && fs.existsSync(uninstallerPath),
+    installerFlavor: flavor,
+    userDataPath: app.getPath('userData'),
+  };
+});
+
+// Removes Riot Relay from this computer. The bundled NSIS uninstaller only
+// removes the installed program files (it never touches AppData, matching
+// deleteAppDataOnUninstall:false in electron-builder.yml), so this handler
+// is the only place saved accounts/settings can actually be deleted, and it
+// only does so when the user explicitly opts out of keeping them.
+handleTrusted('app:uninstall', async ({ keepUserData = true } = {}) => {
+  const flavor = String(packageMetadata.installerFlavor || 'development');
+  if (!app.isPackaged || process.platform !== 'win32') {
+    throw new Error('Uninstall is only available from an installed Windows build.');
+  }
+  if (flavor !== 'nsis') {
+    throw new Error('MSI installations are removed from Windows Settings › Apps, or by an administrator.');
+  }
+  const uninstallerPath = path.join(path.dirname(process.execPath), `Uninstall ${APP_NAME}.exe`);
+  if (!fs.existsSync(uninstallerPath)) {
+    throw new Error('The uninstaller could not be found next to this application.');
+  }
+
+  const userDataPath = app.getPath('userData');
+  if (!keepUserData) {
+    // Lock and drop the in-memory key first so nothing else can write to the
+    // vault while its file is being removed, then delete the whole
+    // per-user data directory (vault, sessions, settings, logs).
+    try { if (vault) vault.lock(); } catch { /* best effort */ }
+    try { fs.rmSync(userDataPath, { recursive: true, force: true }); }
+    catch (error) { throw new Error(`Could not remove saved data: ${safeError(error, 'Unknown error.')}`); }
+  }
+
+  // Launch the real NSIS uninstaller interactively (not /S) so Windows still
+  // shows its own confirmation and progress UI, then quit this app so the
+  // uninstaller can remove the running executable's files.
+  spawn(uninstallerPath, [], { detached: true, stdio: 'ignore' }).unref();
+  setTimeout(() => app.quit(), 300);
+  return { started: true };
+});
 
 handleTrusted('app:open-project', async (target) => {
   const destinations = {

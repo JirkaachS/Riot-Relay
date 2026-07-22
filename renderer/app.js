@@ -1106,7 +1106,10 @@ function rankHistory(history, gameId) {
         ${gameId === 'valorant'
     ? rankIcon(row.tier || 0, 'rank-history__icon')
     : rankEmblem(tierName, gameId, 'rank-history__icon')}
-        <div><span>${escapeHtml(seasonLabel(row.label || row.seasonId, index, gameId))}${row.queue ? ` · ${escapeHtml(queueName(row.queue))}` : ''}</span><strong>${escapeHtml(tierName === 'UNRANKED' ? 'Unranked' : `${tierName} ${division}`.trim())}</strong></div>
+        <div class="rank-history__info">
+          <span>${escapeHtml(seasonLabel(row.label || row.seasonId, index, gameId))}${row.queue ? ` · ${escapeHtml(queueName(row.queue))}` : ''}</span>
+          <strong>${escapeHtml(tierName === 'UNRANKED' ? 'Unranked' : `${tierName} ${division}`.trim())}</strong>
+        </div>
         <div class="rank-history__metrics">${rankMetrics(row) || (row.games != null ? `${fmt(row.games)} games` : '')}</div>
       </div>`;
     }).join('')}</div>
@@ -2417,6 +2420,7 @@ async function loadSettings() {
   $('#set-hide-login').checked = !!s.hideLoginNames;
   $('#set-hide-display').checked = !!s.hideDisplayNames;
   $('#set-rank-borders').checked = s.showRosterRankBorders === true;
+  loadUninstallInfo();
   $('#client-detected').textContent = s.detectedClient ? `Detected: ${s.detectedClient}` : 'Riot Client not auto-detected. Set the path manually.';
   $('#enc-status').textContent = s.encryptionAvailable
     ? 'Windows OS key protection is available. Choose how this vault may use it below.'
@@ -2878,6 +2882,63 @@ $('#btn-change-master').addEventListener('click', async () => {
     $('#set-current-master').value = ''; $('#set-new-master').value = ''; $('#set-new-master-confirm').value = '';
     toast('Master password updated.', 'good');
   } catch (e) { toast(e.message, 'bad'); }
+});
+/* ---------------- Uninstall ---------------- */
+async function loadUninstallInfo() {
+  const button = $('#btn-uninstall');
+  const status = $('#uninstall-status');
+  try {
+    const info = unwrap(await api.uninstall.getInfo());
+    button.disabled = !info.supported;
+    status.hidden = info.supported;
+    status.textContent = info.supported ? '' : (
+      info.installerFlavor === 'msi'
+        ? 'MSI installations are removed from Windows Settings › Apps, or by an administrator.'
+        : 'Uninstall is only available in the installed Windows EXE build.'
+    );
+  } catch {
+    button.disabled = true;
+    status.hidden = false;
+    status.textContent = 'Uninstall is only available in the installed Windows EXE build.';
+  }
+}
+const uninstallModal = $('#uninstall-modal');
+function openUninstallModal() {
+  const keepData = $('#set-uninstall-keep-data').checked;
+  $('#uninstall-modal-data-warning').hidden = keepData;
+  $('#uninstall-modal-body').textContent = keepData
+    ? 'This closes Riot Relay and starts the Windows uninstaller. Your saved accounts, sessions, and settings will be kept on disk.'
+    : 'This closes Riot Relay and starts the Windows uninstaller.';
+  uninstallModal.classList.remove('is-leaving');
+  uninstallModal.hidden = false;
+  $('#btn-uninstall-confirm').focus();
+}
+function closeUninstallModal() {
+  if (uninstallModal.hidden || uninstallModal.classList.contains('is-leaving')) return;
+  uninstallModal.classList.add('is-leaving');
+  const finish = () => { uninstallModal.hidden = true; uninstallModal.classList.remove('is-leaving'); };
+  if (reducedMotion.matches) finish();
+  else setTimeout(finish, 190);
+}
+$('#btn-uninstall').addEventListener('click', openUninstallModal);
+$$('[data-uninstall-close]', uninstallModal).forEach((element) => element.addEventListener('click', closeUninstallModal));
+document.addEventListener('keydown', (event) => {
+  if (uninstallModal.hidden || event.key !== 'Escape') return;
+  event.preventDefault();
+  closeUninstallModal();
+});
+$('#btn-uninstall-confirm').addEventListener('click', async () => {
+  const button = $('#btn-uninstall-confirm');
+  const keepUserData = $('#set-uninstall-keep-data').checked;
+  button.disabled = true;
+  try {
+    unwrap(await api.uninstall.run(keepUserData));
+    // The main process quits shortly after this resolves; no further UI
+    // feedback is needed since the window itself is about to close.
+  } catch (error) {
+    button.disabled = false;
+    toast(error.message, 'bad');
+  }
 });
 $('#btn-refresh-catalog').addEventListener('click', async (event) => {
   const button = event.currentTarget;

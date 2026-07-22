@@ -447,6 +447,19 @@
                 <button class="btn btn--ghost" id="btn-change-master">Update</button>
               </div>
             </div>
+            <section class="danger-zone" id="uninstall-panel" aria-labelledby="uninstall-title">
+              <div class="danger-zone__head">
+                <strong id="uninstall-title">Uninstall Riot Relay</strong>
+                <p>Removes the installed program from this computer. Available only in the installed Windows EXE build.</p>
+              </div>
+              <label class="toggle toggle--stacked">
+                <input type="checkbox" id="set-uninstall-keep-data" checked />
+                <span class="toggle__track"><span class="toggle__thumb"></span></span>
+                <span><b>Keep my saved accounts and settings</b><small>Leaves the encrypted vault, saved sessions, and settings on disk so a future install can pick up where this left off. Uncheck to permanently delete them too.</small></span>
+              </label>
+              <button class="btn btn--danger" id="btn-uninstall" type="button">Uninstall…</button>
+              <p class="hint" id="uninstall-status" hidden></p>
+            </section>
           </div>
 
           <div class="panel setting-group" data-group="catalog">
@@ -532,6 +545,25 @@
         <button class="btn btn--primary" type="submit" id="section-modal-submit">Create section</button>
       </div>
     </form>
+  </div>
+
+  <!-- Uninstall confirmation modal -->
+  <div class="modal" id="uninstall-modal" role="dialog" aria-modal="true" aria-labelledby="uninstall-modal-title" hidden>
+    <div class="modal__backdrop" data-uninstall-close></div>
+    <div class="modal__box">
+      <div class="modal__head">
+        <h3 id="uninstall-modal-title">Uninstall Riot Relay?</h3>
+        <button class="iconbtn" type="button" data-uninstall-close aria-label="Close uninstall dialog"><span data-icon="x" data-size="15"></span></button>
+      </div>
+      <div class="modal__body">
+        <p id="uninstall-modal-body">This closes Riot Relay and starts the Windows uninstaller.</p>
+        <p class="section-delete-warning" id="uninstall-modal-data-warning" hidden><strong>Your saved accounts, sessions, and settings will also be permanently deleted.</strong> This cannot be undone.</p>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" data-uninstall-close>Cancel</button>
+        <button class="btn btn--danger" type="button" id="btn-uninstall-confirm">Uninstall</button>
+      </div>
+    </div>
   </div>
 
   <!-- Account modal -->

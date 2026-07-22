@@ -148,5 +148,10 @@ contextBridge.exposeInMainWorld('api', {
     open: (target) => invoke('app:open-project', String(target || '')),
   },
 
+  uninstall: {
+    getInfo: () => invoke('app:get-uninstall-info'),
+    run: (keepUserData) => invoke('app:uninstall', { keepUserData: keepUserData !== false }),
+  },
+
   openExternal: (url) => invoke('app:open-external', url),
 });
