@@ -33,6 +33,15 @@ jobs:
         run: npm run dist:nsis
       - name: Build x64 MSI release
         run: npm run dist:msi
+      - name: Install custom installer dependencies
+        run: npm run installer:install-deps
+      - name: Build custom branded installer
+        # dist:nsis above already produced dist/win-unpacked as an
+        # intermediate step, so it is reused here as the payload source
+        # instead of rebuilding it.
+        run: |
+          node installer/build-payload.js
+          npx --prefix installer electron-builder --config installer/electron-builder.yml --publish never
       - name: Publish complete GitHub release
         shell: pwsh
         run: |
@@ -46,7 +55,8 @@ jobs:
             "dist/Riot-Relay-Setup-${version}-x64.exe",
             "dist/Riot-Relay-Setup-${version}-x64.exe.blockmap",
             "dist/latest.yml",
-            "dist/Riot-Relay-${version}-x64.msi"
+            "dist/Riot-Relay-${version}-x64.msi",
+            "installer/dist/Riot-Relay-Installer-${version}-x64.exe"
           )
           $checksumFile = "dist/SHA256SUMS.txt"
           $assets | ForEach-Object {

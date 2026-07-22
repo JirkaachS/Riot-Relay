@@ -52,3 +52,10 @@ Desktop.ini
 # Keep source-controlled build assets such as build/icon.*
 !build/
 !build/icon.*
+
+# Custom installer generated payload/build output (rebuilt from dist/win-unpacked)
+installer/node_modules/
+installer/dist/
+installer/resources/payload.zip
+installer/resources/manifest.json
+installer/resources/LICENSE.txt

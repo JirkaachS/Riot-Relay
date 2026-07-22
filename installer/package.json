@@ -1,0 +1,22 @@
+{
+  "name": "riot-relay-installer",
+  "productName": "Riot Relay Setup",
+  "version": "1.4.3",
+  "private": true,
+  "description": "Custom branded installer/uninstaller wizard for Riot Relay.",
+  "main": "main.js",
+  "author": "Riot Relay contributors",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:payload": "node build-payload.js",
+    "dist": "npm run build:payload && electron-builder --config electron-builder.yml --publish never"
+  },
+  "devDependencies": {
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3"
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true
+  }
+}
