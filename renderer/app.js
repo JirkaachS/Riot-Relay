@@ -35,7 +35,7 @@ const state = {
   activity: [],
   rankIcons: {},
   settings: {},
-  updates: { status: 'idle', currentVersion: '1.3.8', availableVersion: null, progress: 0 },
+  updates: { status: 'idle', currentVersion: '1.3.9', availableVersion: null, progress: 0 },
   startup: { supported: false, enabled: false, reason: 'Checking Windows startup registration…' },
   configProfiles: [],
   configProfilesError: null,
@@ -944,9 +944,12 @@ const LEAGUE_RANK_COLORS = {
   EMERALD: '#3fbb78', DIAMOND: '#6b82d8', MASTER: '#9a62c7', GRANDMASTER: '#d4545b', CHALLENGER: '#d1ad5c',
   UNRANKED: '#555762',
 };
-const LEAGUE_EMBLEM_TIERS = new Set(['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'grandmaster', 'challenger']);
-const COMMUNITYDRAGON_RANK_BASE = 'https://raw.communitydragon.org/16.14/plugins/rcp-fe-lol-static-assets/global/default';
-const LEAGUE_EMBLEM_BASE = `${COMMUNITYDRAGON_RANK_BASE}/ranked-emblem`;
+const LEAGUE_EMBLEM_TIERS = new Set(['Iron', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Master', 'Grandmaster', 'Challenger']);
+// Classic pre-rework League/TFT rank emblems (the art used before the 2023
+// visual rework and before CommunityDragon's "16.14" set, which serves the
+// newer redesigned emblems). Emerald has no classic emblem in this set — the
+// user-supplied local asset below is used for that tier instead.
+const LEAGUE_EMBLEM_BASE = 'https://cdn.jsdelivr.net/gh/magisteriis/lol-icons-and-emblems@9168d1e/ranked-emblems';
 const LEAGUE_EMERALD_ASSET = '/renderer/emerald-rank.png';
 function gameMark(game) {
   const paths = {
@@ -958,10 +961,11 @@ function gameMark(game) {
 }
 function rankEmblem(tier, game, className = 'rank-emblem') {
   const normalized = String(tier || 'UNRANKED').trim().toUpperCase();
-  const assetTier = normalized.toLowerCase();
-  const supported = LEAGUE_EMBLEM_TIERS.has(assetTier);
+  const title = normalized.charAt(0) + normalized.slice(1).toLowerCase();
+  const isEmerald = normalized === 'EMERALD';
+  const supported = isEmerald || LEAGUE_EMBLEM_TIERS.has(title);
   const fallback = normalized === 'UNRANKED' ? '—' : normalized.slice(0, 2);
-  const source = assetTier === 'emerald' ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/emblem-${assetTier}.png`;
+  const source = isEmerald ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/Emblem_${title}.png`;
   return `<span class="${className} ${className}--${game}" style="--rank-accent:${LEAGUE_RANK_COLORS[normalized] || LEAGUE_RANK_COLORS.UNRANKED}" aria-hidden="true">
     <span class="rank-emblem__fallback">${escapeHtml(fallback)}</span>
     ${supported ? `<img data-rank-asset src="${source}" alt="" loading="lazy" decoding="async" />` : ''}
@@ -1201,12 +1205,14 @@ function rosterGameLabel(game) {
 function rosterArtworkTier(rank) {
   const tier = normalizedRosterTier(rank && rank.tierName).toLowerCase();
   const mapped = { ascendant: 'emerald', immortal: 'grandmaster', radiant: 'challenger' }[tier] || tier;
-  return LEAGUE_EMBLEM_TIERS.has(mapped) ? mapped : null;
+  const title = mapped.charAt(0).toUpperCase() + mapped.slice(1);
+  return mapped === 'emerald' || LEAGUE_EMBLEM_TIERS.has(title) ? mapped : null;
 }
 function rosterRankFrame(rank) {
   const tier = rosterArtworkTier(rank);
   if (!tier) return '';
-  const crestSource = tier === 'emerald' ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/emblem-${tier}.png`;
+  const title = tier.charAt(0).toUpperCase() + tier.slice(1);
+  const crestSource = tier === 'emerald' ? LEAGUE_EMERALD_ASSET : `${LEAGUE_EMBLEM_BASE}/Emblem_${title}.png`;
   // The plain classic per-tier crest only. Layered wing-plate splash art and
   // border-accent overlays were removed: at roster-row size they rendered as
   // oversized, distorted artwork rather than a clean badge.
@@ -2870,7 +2876,7 @@ function renderUpdateState(updateState) {
   const previousStatus = lastUpdateStatus;
   state.updates = { ...state.updates, ...updateState };
   lastUpdateStatus = state.updates.status;
-  const version = String(state.updates.currentVersion || '1.3.8');
+  const version = String(state.updates.currentVersion || '1.3.9');
   const available = String(state.updates.availableVersion || '');
   const progress = Math.max(0, Math.min(100, Number(state.updates.progress) || 0));
   $('#app-version-title').textContent = version;

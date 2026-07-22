@@ -2,7 +2,7 @@
 
 Riot Relay is a Windows account command center for Riot games: encrypted credentials, PUUID-bound sessions, deliberate switching, unified stats and inventories, current-session chat, privacy controls, local League/TFT/Runeterra profile migration, and validated VALORANT cloud-settings migration.
 
-**Version 1.3.8** · [Documentation](https://jirkaachs.github.io/Riot-Relay/) · [Latest release](https://github.com/JirkaachS/Riot-Relay/releases/latest) · [Release notes](.github/release-notes/v1.3.8.md) · [Security](https://jirkaachs.github.io/Riot-Relay/security.html) · [Privacy](https://jirkaachs.github.io/Riot-Relay/privacy.html)
+**Version 1.3.9** · [Documentation](https://jirkaachs.github.io/Riot-Relay/) · [Latest release](https://github.com/JirkaachS/Riot-Relay/releases/latest) · [Release notes](.github/release-notes/v1.3.9.md) · [Security](https://jirkaachs.github.io/Riot-Relay/security.html) · [Privacy](https://jirkaachs.github.io/Riot-Relay/privacy.html)
 
 ## Interface
 

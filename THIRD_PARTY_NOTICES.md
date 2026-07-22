@@ -26,18 +26,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## League ranked artwork
 
-League and TFT rank emblems shown on roster accounts are loaded from
-[CommunityDragon](https://www.communitydragon.org/)'s pinned `16.14` distribution of
-`plugins/rcp-fe-lol-static-assets/global/default`, using the classic single-crest
-`ranked-emblem/emblem-{tier}.png` path only (no wing-plate or border-accent
-overlays). CommunityDragon distributes extracted client assets for developer
-access; the underlying ranked artwork remains owned by Riot Games and is not
-presented as CommunityDragon-authored artwork.
+League and TFT rank emblems shown on roster accounts and stat cards use the
+classic, pre-rework emblem set (the art used before Riot's newer rank-emblem
+redesign), sourced from
+[magisteriis/lol-icons-and-emblems](https://github.com/magisteriis/lol-icons-and-emblems)
+via jsDelivr, pinned to a fixed commit. That repository packages extracted
+Riot client assets for developer access; the underlying ranked artwork remains
+owned by Riot Games and is not presented as repository-authored artwork.
 
 `renderer/emerald-rank.png` is the maintainer-supplied Emerald crest and is the
-sole local exception for tier emblems, used in place of CommunityDragon's
-Emerald emblem. CSS gradients and glows provide a fallback if remote
-decorative artwork is unavailable.
+sole local exception for tier emblems, since the classic set predates the
+Emerald tier. CSS gradients and glows provide a fallback if remote decorative
+artwork is unavailable.
 
 ## Product disclaimer
 
