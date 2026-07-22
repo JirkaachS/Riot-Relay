@@ -292,14 +292,14 @@ test('stale platform hint and search-row PUUID cannot satisfy discovery', async 
   } finally { mock.restore(); }
 });
 
-test('platform discovery requires PUUID and is bounded to three concurrent allowlisted probes', async () => {
+test('platform discovery requires PUUID and is bounded to six concurrent allowlisted probes', async () => {
   const mock = mockJsonByUrl(() => ({ data: [] }));
   try {
     await assert.rejects(discoverOpggStats('Wanted#TAG', ''), /expected PUUID/i);
     assert.equal(mock.requests.length, 0);
     await assert.rejects(discoverOpggStats('Wanted#TAG', 'wanted-puuid', '', { timeoutMs: 1000 }), /No League platform matched/i);
     assert.equal(mock.requests.length, LEAGUE_PLATFORMS.length);
-    assert.ok(mock.maxActive() <= 3);
+    assert.ok(mock.maxActive() <= 6);
   } finally { mock.restore(); }
 });
 

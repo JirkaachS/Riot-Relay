@@ -479,46 +479,48 @@ async function fetchOpggStats(riotId, platform, expectedPuuid, options = {}) {
 
   const candidates = [...new Map(identifiedMatches.map((row) => [providerSummonerId(row), row])).values()].slice(0, 10);
 
+  // Candidate summaries are independent HTTP round-trips against distinct
+  // summoner IDs, so they are resolved concurrently instead of one at a time.
   const candidateErrors = [];
   const verified = [];
-  for (const match of candidates) {
-    try {
-      const summonerId = providerSummonerId(match);
-      const summaryUrl = new URL(`https://${OPGG_API_HOST}/api/${regionSlug}/summoners/${encodeURIComponent(summonerId)}/summary`);
-      summaryUrl.searchParams.set('hl', 'en_US');
-      const summary = await remoteJson(summaryUrl, new Set([OPGG_API_HOST]), 'OP.GG');
-      const summoner = opggSummarySummoner(summary);
-      if (!summoner) throw new Error('OP.GG summary response schema was not recognized.');
-      if (!exactRiotId(summoner, gameName, tagLine)) throw new Error('OP.GG summary identity did not match the requested Riot ID.');
-      // Search rows only locate exact-Riot-ID summary candidates. A matching
-      // provider PUUID corroborates the identity; a stale/absent one no longer
-      // rejects the exact Riot ID match.
-      const puuidCheck = checkedProviderPuuid([summoner], wantedPuuid, 'OP.GG');
-      const providerPuuidValue = puuidCheck.providerPuuid;
-      const providerPuuidCorroborated = puuidCheck.corroborated;
-      const identity = providerRiotIdentity(summoner);
-      const level = finiteProviderNumber(aliasValue(summoner, ['level', 'summoner_level', 'summonerLevel']))
-        ?? finiteProviderNumber(aliasValue(match, ['level', 'summoner_level', 'summonerLevel']))
-        ?? 0;
-      const ranked = opggLeaguePayload(summoner, summary);
-      verified.push({
-        available: true,
-        providerPuuid: providerPuuidValue,
-        providerPuuidCorroborated,
-        riotId: `${identity.gameName}#${identity.tagLine}`,
-        platformId,
-        level,
-        profileIconId: null,
-        queues: ranked.queues,
-        pastSeasons: ranked.pastSeasons,
-        source: 'opgg',
-        profileUrl: opggProfileUrl(riotId, platformId),
-        approximate: false,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      candidateErrors.push(error && error.message ? error.message : 'OP.GG summary lookup failed.');
-    }
+  const results = await Promise.allSettled(candidates.map(async (match) => {
+    const summonerId = providerSummonerId(match);
+    const summaryUrl = new URL(`https://${OPGG_API_HOST}/api/${regionSlug}/summoners/${encodeURIComponent(summonerId)}/summary`);
+    summaryUrl.searchParams.set('hl', 'en_US');
+    const summary = await remoteJson(summaryUrl, new Set([OPGG_API_HOST]), 'OP.GG');
+    const summoner = opggSummarySummoner(summary);
+    if (!summoner) throw new Error('OP.GG summary response schema was not recognized.');
+    if (!exactRiotId(summoner, gameName, tagLine)) throw new Error('OP.GG summary identity did not match the requested Riot ID.');
+    // Search rows only locate exact-Riot-ID summary candidates. A matching
+    // provider PUUID corroborates the identity; a stale/absent one no longer
+    // rejects the exact Riot ID match.
+    const puuidCheck = checkedProviderPuuid([summoner], wantedPuuid, 'OP.GG');
+    const providerPuuidValue = puuidCheck.providerPuuid;
+    const providerPuuidCorroborated = puuidCheck.corroborated;
+    const identity = providerRiotIdentity(summoner);
+    const level = finiteProviderNumber(aliasValue(summoner, ['level', 'summoner_level', 'summonerLevel']))
+      ?? finiteProviderNumber(aliasValue(match, ['level', 'summoner_level', 'summonerLevel']))
+      ?? 0;
+    const ranked = opggLeaguePayload(summoner, summary);
+    return {
+      available: true,
+      providerPuuid: providerPuuidValue,
+      providerPuuidCorroborated,
+      riotId: `${identity.gameName}#${identity.tagLine}`,
+      platformId,
+      level,
+      profileIconId: null,
+      queues: ranked.queues,
+      pastSeasons: ranked.pastSeasons,
+      source: 'opgg',
+      profileUrl: opggProfileUrl(riotId, platformId),
+      approximate: false,
+      updatedAt: new Date().toISOString(),
+    };
+  }));
+  for (const result of results) {
+    if (result.status === 'fulfilled') verified.push(result.value);
+    else candidateErrors.push(result.reason && result.reason.message ? result.reason.message : 'OP.GG summary lookup failed.');
   }
 
   // Prefer a PUUID-corroborated summary; otherwise a single exact Riot ID
@@ -1093,7 +1095,7 @@ async function discoverOpgg(riotId, expectedPuuid, preferredPlatformId, options,
   const platforms = preferred
     ? [preferred, ...LEAGUE_PLATFORMS.filter((platformId) => platformId !== preferred)]
     : [...LEAGUE_PLATFORMS];
-  const concurrency = Math.max(1, Math.min(3, Number(options.concurrency) || 3));
+  const concurrency = Math.max(1, Math.min(6, Number(options.concurrency) || 6));
   const deadlineAt = Date.now() + Math.max(100, Math.min(30000, Number(options.timeoutMs) || 30000));
   const errors = [];
 

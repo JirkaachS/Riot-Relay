@@ -475,6 +475,12 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
         if (-not $windowDetected) {
           Write-Output '{"checkpoint":"WINDOW_DETECTED"}'
           $windowDetected = $true
+          # Querying UI Automation on a Chromium window is what triggers it to
+          # start building its accessibility tree in the first place. Firing
+          # this warm-up query as soon as the window appears (result ignored)
+          # means the tree is already forming during the stability wait below,
+          # instead of only starting once the separate readiness loop begins.
+          Test-LoginControls $candidate | Out-Null
         }
         if ($candidate -eq $lastHandle -and $width -eq $lastWidth -and $height -eq $lastHeight) {
           $stable++
@@ -500,12 +506,16 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
     } | ConvertTo-Json -Compress | Write-Output
 
     # A top-level Chromium HWND appears before its form. Prefer the actual UIA
-    # edit-control signal when Riot exposes it; otherwise require eight seconds
+    # edit-control signal when Riot exposes it; otherwise require six seconds
     # of continuous stability from the first trusted observation. Keeping that
     # timestamp avoids restarting the hydration wait after window selection.
-    $formReady = $false; $readyStable = $stable
+    # The UIA warm-up query fired at WINDOW_DETECTED above means the
+    # accessibility tree is usually already built well before this loop even
+    # starts, so most switches resolve on the fast Test-LoginControls path
+    # rather than waiting out this floor.
+    $formReady = $false; $readyStable = $stable * 2
     if ($null -eq $trustedObservedSince) { $trustedObservedSince = [DateTime]::UtcNow }
-    for ($i = 0; $i -lt 60; $i++) {
+    for ($i = 0; $i -lt 120; $i++) {
       [uint32[]]$readyPids = @(Get-TrustedRiotPids)
       $candidate = [NativeInput]::FindRiotWindow($readyPids)
       if ($candidate -ne [IntPtr]::Zero) {
@@ -518,14 +528,17 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
         }
         $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
         $elapsed = ([DateTime]::UtcNow - $trustedObservedSince).TotalMilliseconds
-        if ((Test-LoginControls $candidate) -or ($elapsed -ge 8000 -and $readyStable -ge 8)) {
+        # readyStable is sampled every 250ms now (was 500ms), so 16 samples
+        # still means the same 4000ms of continuous size stability as before;
+        # only the elapsed-time floor itself was lowered, from 8s to 6s.
+        if ((Test-LoginControls $candidate) -or ($elapsed -ge 6000 -and $readyStable -ge 16)) {
           $h = $candidate; $formReady = $true; break
         }
       } else {
         $readyStable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
         $trustedObservedSince = $null
       }
-      Start-Sleep -Milliseconds 500
+      Start-Sleep -Milliseconds 250
     }
     if (-not $formReady) { throw 'FORM_NOT_READY: Riot opened a window but its login form did not become ready' }
     Assert-TrustedRiotWindow $h

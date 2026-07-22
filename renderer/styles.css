@@ -686,11 +686,7 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .arow.has-rank-border { background-image: radial-gradient(ellipse at 88% 50%, color-mix(in srgb, var(--roster-rank-accent) 13%, transparent), transparent 42%), linear-gradient(90deg, color-mix(in srgb, var(--roster-rank-accent) 7%, transparent), transparent 48%); }
 .arow.has-rank-border::before { content: ''; position: absolute; inset: 1px; z-index: 1; border-left: 2px solid color-mix(in srgb, var(--roster-rank-accent) 85%, #fff 8%); background: linear-gradient(90deg, color-mix(in srgb, var(--roster-rank-accent) 15%, transparent), transparent 28%, color-mix(in srgb, var(--roster-rank-accent) 7%, transparent)); box-shadow: inset 8px 0 14px -12px var(--roster-rank-accent), inset -8px 0 14px -12px var(--roster-rank-accent); pointer-events: none; }
 .arow.has-rank-border::after { content: ''; position: absolute; inset: 0; z-index: 2; border: 1px solid color-mix(in srgb, var(--roster-rank-accent) 58%, transparent); border-radius: 3px; clip-path: polygon(0 0, 35% 0, 39% 2px, 61% 2px, 65% 0, 100% 0, 100% 100%, 65% 100%, 61% calc(100% - 2px), 39% calc(100% - 2px), 35% 100%, 0 100%); box-shadow: inset 0 0 12px color-mix(in srgb, var(--roster-rank-accent) 12%, transparent), 0 0 8px color-mix(in srgb, var(--roster-rank-accent) 12%, transparent); pointer-events: none; }
-.arow__rank-frame { position: absolute; inset: 0; z-index: 1; overflow: hidden; border-radius: 3px; pointer-events: none; }
-.arow__rank-frame img { position: absolute; display: block; pointer-events: none; }
-.arow__rank-frame img[hidden], [data-rank-asset][hidden] { display: none; }
-.arow__rank-crest { width: 40px; height: 40px; top: 50%; right: 6px; object-fit: contain; opacity: .16; transform: translateY(-50%); filter: saturate(.85) drop-shadow(0 0 4px var(--roster-rank-accent)); }
-.arow.has-rank-border > :not(.arow__rank-frame) { position: relative; z-index: 3; }
+.arow.has-rank-border > * { position: relative; z-index: 3; }
 .roster-head-actions { display: flex; align-items: center; gap: 4px; }
 .roster-head-btn { min-height: 22px; padding: 0 6px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--muted); font: 700 8px Inter, sans-serif; cursor: pointer; }
 .roster-head-btn:hover { border-color: #454550; color: var(--text); }
