@@ -1,7 +1,7 @@
 {
   "name": "riot-relay",
   "productName": "Riot Relay",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "A secure multi-game Riot account switcher with encrypted credentials, identity-bound sessions, unified stats, inventory tools, and privacy-first presence controls.",
   "main": "electron/main.js",
   "author": "Riot Relay contributors",
@@ -25,9 +25,7 @@
     "dist:msi": "electron-builder --config electron-builder.msi.yml --publish never",
     "dist:win": "npm run dist:nsis && npm run dist:msi",
     "release:nsis": "electron-builder --config electron-builder.nsis.yml --publish always",
-    "release:msi": "electron-builder --config electron-builder.msi.yml --publish always",
-    "installer:install-deps": "npm --prefix installer install",
-    "installer:build": "npm run pack && npm --prefix installer run dist"
+    "release:msi": "electron-builder --config electron-builder.msi.yml --publish always"
   },
   "devDependencies": {
     "electron": "43.1.1",

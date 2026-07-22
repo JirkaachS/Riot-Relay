@@ -33,20 +33,6 @@ jobs:
         run: npm run dist:nsis
       - name: Build x64 MSI release
         run: npm run dist:msi
-      - name: Install custom installer dependencies
-        run: npm run installer:install-deps
-      - name: Build custom branded installer
-        # dist:nsis above already produced dist/win-unpacked as an
-        # intermediate step, so it is reused here as the payload source
-        # instead of rebuilding it. `npx --prefix` only changes npm's
-        # dependency-resolution root, not the working directory, so
-        # electron-builder must actually be run with cwd set to installer/
-        # or it packages the wrong project (the repo root) into the wrong
-        # dist/ directory.
-        working-directory: installer
-        run: |
-          node build-payload.js
-          npx electron-builder --config electron-builder.yml --publish never
       - name: Publish complete GitHub release
         shell: pwsh
         run: |
@@ -60,8 +46,7 @@ jobs:
             "dist/Riot-Relay-Setup-${version}-x64.exe",
             "dist/Riot-Relay-Setup-${version}-x64.exe.blockmap",
             "dist/latest.yml",
-            "dist/Riot-Relay-${version}-x64.msi",
-            "installer/dist/Riot-Relay-Installer-${version}-x64.exe"
+            "dist/Riot-Relay-${version}-x64.msi"
           )
           $checksumFile = "dist/SHA256SUMS.txt"
           $assets | ForEach-Object {

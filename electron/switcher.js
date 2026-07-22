@@ -272,7 +272,13 @@ async function launchProduct(clientPath, { game, configUrl = '' } = {}) {
   // merely signal the first (which may be ignored), so we do not double-launch.
   const launchMark = Date.now();
   await launchClient(clientPath, { game, configUrl });
-  const detection = await waitForProductStart(game, { timeoutMs: 25000, sinceEpochMs: launchMark });
+  // Since Riot's 2026 unified client, --launch-product no longer starts the
+  // game process directly — it opens the Riot Client to that game's tab and
+  // the user presses PLAY there. Waiting a long time for a game process that
+  // will not appear on its own made a successful, accepted launch request
+  // look like a hang. A short window still catches the rarer case where the
+  // process starts immediately (e.g. it was already patched and PLAY-ready).
+  const detection = await waitForProductStart(game, { timeoutMs: 8000, sinceEpochMs: launchMark });
   // launcherAccepted: RiotClientServices accepted the request (the game is
   // launching/patching or waiting on PLAY). launchVerified: a freshly started
   // game process was actually observed. The switch succeeds on acceptance.
@@ -506,15 +512,15 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
     } | ConvertTo-Json -Compress | Write-Output
 
     # A top-level Chromium HWND appears before its form. Prefer the actual UIA
-    # edit-control signal when Riot exposes it; otherwise require six seconds
-    # of continuous stability from the first trusted observation. Keeping that
-    # timestamp avoids restarting the hydration wait after window selection.
-    # The UIA warm-up query fired at WINDOW_DETECTED above means the
-    # accessibility tree is usually already built well before this loop even
-    # starts, so most switches resolve on the fast Test-LoginControls path
-    # rather than waiting out this floor.
+    # edit-control signal when Riot exposes it; otherwise fall back to an
+    # absolute six-second ceiling measured from when this readiness loop
+    # started. That ceiling is intentionally NOT tied to $trustedObservedSince
+    # (which resets on every resize) — the newer unified Riot Client (2026)
+    # visibly resizes its login window multiple times while hydrating, which
+    # previously kept pushing the floor back indefinitely and turned a
+    # supposed 6-second fallback into a much longer, unbounded wait.
     $formReady = $false; $readyStable = $stable * 2
-    if ($null -eq $trustedObservedSince) { $trustedObservedSince = [DateTime]::UtcNow }
+    $formWaitStart = [DateTime]::UtcNow
     for ($i = 0; $i -lt 120; $i++) {
       [uint32[]]$readyPids = @(Get-TrustedRiotPids)
       $candidate = [NativeInput]::FindRiotWindow($readyPids)
@@ -524,19 +530,17 @@ async function autoLogin(username, password, clientPath, onDiagnostic = () => {}
           $readyStable++
         } else {
           $readyStable = 0
-          $trustedObservedSince = [DateTime]::UtcNow
         }
         $lastHandle = $candidate; $lastWidth = $width; $lastHeight = $height
-        $elapsed = ([DateTime]::UtcNow - $trustedObservedSince).TotalMilliseconds
-        # readyStable is sampled every 250ms now (was 500ms), so 16 samples
-        # still means the same 4000ms of continuous size stability as before;
-        # only the elapsed-time floor itself was lowered, from 8s to 6s.
-        if ((Test-LoginControls $candidate) -or ($elapsed -ge 6000 -and $readyStable -ge 16)) {
+        $absoluteElapsed = ([DateTime]::UtcNow - $formWaitStart).TotalMilliseconds
+        # A short continuous-stability requirement still guards against typing
+        # into a window that is mid-resize at the exact ceiling instant, but it
+        # no longer resets the ceiling itself — worst case is a flat 6s wait.
+        if ((Test-LoginControls $candidate) -or ($absoluteElapsed -ge 6000 -and $readyStable -ge 4)) {
           $h = $candidate; $formReady = $true; break
         }
       } else {
         $readyStable = 0; $lastHandle = [IntPtr]::Zero; $lastWidth = 0; $lastHeight = 0
-        $trustedObservedSince = $null
       }
       Start-Sleep -Milliseconds 250
     }
@@ -657,7 +661,7 @@ async function switchAccount({
       launchVerified = productLaunch.launchVerified === true;
       onStep(launchVerified
         ? `${targetLabel} is starting.`
-        : `Riot Client accepted the ${targetLabel} launch request. If it does not open, press PLAY in the Riot Client.`);
+        : `Riot Client opened to ${targetLabel}. Press PLAY there to start it.`);
       if (typeof onAfterGameLaunch === 'function') {
         const postLaunch = await onAfterGameLaunch(configMigration, onStep);
         if (postLaunch && typeof postLaunch === 'object') configMigration = { ...(configMigration || {}), ...postLaunch };

@@ -165,6 +165,8 @@ code { background: var(--panel-hi); padding: 1px 6px; border-radius: 6px; font-s
 .btn:active { transform: scale(.97); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn--primary { background: linear-gradient(180deg, #303039, #23232b); border-color: #3b3b47; color: #fff; }
+.btn--danger { background: rgba(224,107,107,.1); border-color: rgba(224,107,107,.35); color: #f0a5a5; }
+.btn--danger:hover { background: rgba(224,107,107,.18); border-color: rgba(224,107,107,.55); color: #ffb9b9; }
 .btn--primary:hover { background: linear-gradient(180deg, #3a3a45, #2a2a33); border-color: #4a4a58; }
 .btn--ghost { background: rgba(255,255,255,.03); }
 .btn--block { width: 100%; justify-content: center; }
@@ -527,15 +529,23 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), select, t
 .rank-history[open] summary::before { transform: rotate(90deg); }
 .rank-history summary span { margin-right: auto; }
 .rank-history summary small { color: var(--muted-2); font-size: 8px; font-weight: 600; }
-.rank-history__rows { max-height: 220px; overflow-y: auto; border-top: 1px solid #27272e; }
-.rank-history__row { display: grid; grid-template-columns: 25px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 42px; padding: 5px 7px; border-bottom: 1px solid #202026; }
+.rank-history__rows { max-height: 260px; overflow-y: auto; border-top: 1px solid #27272e; }
+/* Icon spans both the label and metrics rows; the label sits above its
+   RR/LP · W/L/G/WR line instead of both being crammed into one row with the
+   metrics squeezed into a narrow, non-wrapping "auto" column (which is what
+   previously rendered as an unreadable jammed string like "33RRW1G6WR17%"). */
+.rank-history__row { display: grid; grid-template-columns: 25px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 8px; row-gap: 3px; align-items: center; min-height: 48px; padding: 7px 8px; border-bottom: 1px solid #202026; }
 .rank-history__row:last-child { border-bottom: 0; }
+.rank-history__row > *:first-child { grid-row: 1 / span 2; align-self: center; }
 .rank-history__icon { width: 24px; height: 24px; }
 .rank-history__icon .rank-emblem__fallback { width: 21px; height: 21px; font-size: 6.5px; }
-.rank-history__row > div:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.rank-history__row span { overflow: hidden; color: var(--muted-2); font-size: 7.8px; text-overflow: ellipsis; white-space: nowrap; }
-.rank-history__row strong { overflow: hidden; color: #cfcfd7; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.rank-history__metrics { color: var(--muted); font-size: 8px; white-space: nowrap; }
+.rank-history__info { grid-column: 2; grid-row: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.rank-history__row span { overflow: hidden; color: var(--muted-2); font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.rank-history__row strong { flex: none; overflow: hidden; color: #e4e4ea; font-size: 10.5px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.rank-history__metrics { grid-column: 2; grid-row: 2; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; color: var(--muted); font-size: 9px; }
+.rank-history__metrics b { color: var(--rank-accent); font-size: 9.5px; font-weight: 700; }
+.rank-history__metrics span { display: inline-flex; align-items: center; gap: 3px; }
+.rank-history__metrics i { color: var(--muted-2); font-style: normal; font-size: 7.8px; font-weight: 700; letter-spacing: .3px; }
 .rank-history--empty { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; color: #767680; font-size: 8.5px; }
 .rank-history--empty small { color: #505059; font-size: 7.8px; text-align: right; }
 .game-stat__empty { display: grid; min-height: 82px; place-items: center; padding: 12px; border: 1px dashed #292930; color: var(--muted-2); font-size: 10px; line-height: 1.45; text-align: center; }
@@ -857,6 +867,12 @@ input[type="checkbox"]:focus-visible { outline: 2px solid rgba(185,185,198,.24);
 .key-storage-status { margin: 0; padding: 8px 11px; border-top: 1px solid var(--line); color: var(--muted-2); font-size: 9.5px; line-height: 1.4; }
 .security-password { margin-top: 14px; }
 .security-password > input { margin-bottom: 8px; }
+.danger-zone { margin-top: 18px; padding: 12px; border: 1px solid rgba(224,107,107,.28); border-radius: var(--radius-sm); background: rgba(224,107,107,.05); }
+.danger-zone__head { margin-bottom: 8px; }
+.danger-zone__head strong { display: block; margin-bottom: 3px; color: #f0a5a5; font-size: 12.5px; }
+.danger-zone__head p { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.danger-zone .toggle { margin-bottom: 10px; }
+#uninstall-status { margin-top: 8px; }
 .detail-command-grid { display: grid; grid-template-columns: minmax(300px, 1.4fr) minmax(220px, 1fr) minmax(170px, .72fr); gap: 1px; margin-top: 8px; border: 1px solid var(--line); background: var(--line); }
 .detail-command { min-width: 0; padding: 8px; background: #0e0e12; }
 .detail-command header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
